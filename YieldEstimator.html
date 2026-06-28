@@ -145,9 +145,9 @@ html,body{height:100%;overflow:hidden;background:#ddd6c4;font-family:"Source Ser
         </div>
       </div>
       <div class="photo-slot">
-        <div class="ps-label">Photo 2 &middot; <b>Width</b></div>
+        <div class="ps-label">Photo 2 &middot; <b>Rows (ref)</b></div>
         <div class="photo-zone" id="zoneWid" data-kind="wid">
-          <div class="pz-empty-txt"><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg><br>End view<br>for rows around</div>
+          <div class="pz-empty-txt"><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg><br>End view<br>zoom &amp; count rows</div>
         </div>
       </div>
     </div>
@@ -159,10 +159,10 @@ html,body{height:100%;overflow:hidden;background:#ddd6c4;font-family:"Source Ser
       <label>Kernel Rows Around (even)</label>
       <div class="stepper">
         <button class="minus" id="rows-minus">&minus;</button>
-        <input type="number" id="rowsAround" inputmode="numeric" value="16" readonly>
+        <input type="number" id="rowsAround" inputmode="numeric" value="16">
         <button class="plus" id="rows-plus">+</button>
       </div>
-      <div class="hint">From end view. Always even.</div>
+      <div class="hint">Count the ring on the end photo (zoom in). Always even.</div>
     </div>
     <div class="fg">
       <label>Kernels Per Row (tip &amp; butt excluded)</label>
@@ -223,6 +223,14 @@ html,body{height:100%;overflow:hidden;background:#ddd6c4;font-family:"Source Ser
 </div>
 
 <div class="toast" id="toast"></div>
+
+<div id="zoomOverlay" style="display:none;position:fixed;inset:0;z-index:400;background:rgba(15,13,10,.96);align-items:center;justify-content:center;flex-direction:column;">
+  <div style="position:absolute;top:14px;left:0;right:0;text-align:center;font-family:'DM Mono',monospace;font-size:10px;letter-spacing:1.5px;color:var(--gold-l);text-transform:uppercase;">Pinch to zoom &middot; count the ring</div>
+  <div style="flex:1;width:100%;overflow:auto;display:flex;align-items:center;justify-content:center;-webkit-overflow-scrolling:touch;">
+    <img id="zoomImg" style="max-width:none;width:140%;height:auto;" alt="end view">
+  </div>
+  <button id="zoomClose" style="margin:16px;padding:13px 28px;border-radius:8px;border:1.5px solid var(--gold);background:var(--gold);color:var(--dbg);font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:600;">Done</button>
+</div>
 
 <div class="botnav">
   <button class="ntab" onclick="window.location.href='index.html'">
@@ -336,33 +344,49 @@ function resetZone(kind){
   var z=zoneEl(kind);
   z.innerHTML=kind==='len'
     ?'<div class="pz-empty-txt"><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg><br>Side view<br>for kernels/row</div>'
-    :'<div class="pz-empty-txt"><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg><br>End view<br>for rows around</div>';
+    :'<div class="pz-empty-txt"><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg><br>End view<br>zoom &amp; count rows</div>';
 }
 ge('zoneLen').onclick=function(){ge('fileLen').click();};
 ge('zoneWid').onclick=function(){ge('fileWid').click();};
+
+var widFullSrc=null; // full-res data URL of the current end photo, for zoom
 
 function handleFile(file,kind){
   var img=new Image();
   img.onload=function(){
     var z=zoneEl(kind);z.innerHTML='';
     var cvs=document.createElement('canvas');
-    var maxW=300,sc=Math.min(1,maxW/img.width);
+    // render width photo larger so the ring is countable without zooming out
+    var maxW=kind==='wid'?460:300,sc=Math.min(1,maxW/img.width);
     cvs.width=img.width*sc;cvs.height=img.height*sc;
     cvs.getContext('2d').drawImage(img,0,0,cvs.width,cvs.height);
     z.appendChild(cvs);
-    var badge=document.createElement('div');badge.className='detect-badge';badge.textContent=kind==='len'?'LENGTH':'WIDTH';z.appendChild(badge);
-    if(!cvReady){
-      setStatus('Photo loaded. Vision engine not ready — enter the count by hand.');
-      ge('rowsAround').removeAttribute('readonly');ge('kernelsPerRow').removeAttribute('readonly');
+    var badge=document.createElement('div');badge.className='detect-badge';badge.textContent=kind==='len'?'LENGTH':'TAP TO ZOOM';z.appendChild(badge);
+    if(kind==='wid'){
+      widFullSrc=cvs.toDataURL('image/jpeg',0.9);
+      z.onclick=function(){openZoom(widFullSrc);};
+      analyze(cvs,'wid');
       return;
     }
-    setStatus('<span class="spinner"></span>Analyzing '+(kind==='len'?'kernel length':'rows around')+'…');
-    setTimeout(function(){analyze(cvs,kind);},50);
+    if(!cvReady){
+      setStatus('Photo loaded. Vision engine not ready — enter kernels/row by hand.');
+      ge('kernelsPerRow').removeAttribute('readonly');
+      return;
+    }
+    setStatus('<span class="spinner"></span>Counting kernels down the row…');
+    setTimeout(function(){analyze(cvs,'len');},50);
   };
   img.src=URL.createObjectURL(file);
 }
 ge('fileLen').addEventListener('change',function(e){if(e.target.files[0])handleFile(e.target.files[0],'len');e.target.value='';});
 ge('fileWid').addEventListener('change',function(e){if(e.target.files[0])handleFile(e.target.files[0],'wid');e.target.value='';});
+
+function openZoom(srcUrl){
+  if(!srcUrl)return;
+  ge('zoomImg').src=srcUrl;
+  var o=ge('zoomOverlay');o.style.display='flex';
+}
+ge('zoomClose').onclick=function(){ge('zoomOverlay').style.display='none';};
 
 /* ── OPENCV ANALYSIS ──
    Strategy: isolate the warm-colored ear from background via HSV, crop to it,
@@ -411,16 +435,16 @@ function countPeaks(profile){
   // normalize
   for(var i2=0;i2<n;i2++)sm[i2]=(sm[i2]-mn)/(mx-mn);
   // estimate dominant spacing via mean crossings to set a min-distance guard
-  var peaks=[],thr=0.45;
+  var peaks=[],thr=0.55;
   for(var i3=1;i3<n-1;i3++){
     if(sm[i3]>thr && sm[i3]>=sm[i3-1] && sm[i3]>sm[i3+1]) peaks.push(i3);
   }
-  // merge peaks closer than a fraction of the median gap (dedupe plateaus)
+  // merge peaks closer than a fraction of the median gap (dedupe plateaus & dimples)
   if(peaks.length>2){
     var gaps=[];for(var g=1;g<peaks.length;g++)gaps.push(peaks[g]-peaks[g-1]);
     gaps.sort(function(a,b){return a-b;});
     var medGap=gaps[Math.floor(gaps.length/2)]||1;
-    var minD=medGap*0.55;
+    var minD=medGap*0.70;  // wider guard so a single kernel's dimple/glare isn't split in two
     var merged=[peaks[0]];
     for(var p=1;p<peaks.length;p++){if(peaks[p]-merged[merged.length-1]>=minD)merged.push(peaks[p]);}
     peaks=merged;
@@ -447,6 +471,9 @@ function projection(gray,mask,rect,axis){
 }
 
 function analyzeImage(canvas,kind){
+  // Only the side (length) photo is analyzed by vision. The end (width) photo is
+  // kept purely as a zoomable visual reference for the user's own manual row count,
+  // because an end-on kernel ring foreshortens and can't be counted reliably.
   var src=cv.imread(canvas);
   var gray=new cv.Mat();cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
   var clahe=new cv.CLAHE(2.0,new cv.Size(8,8));clahe.apply(gray,gray);
@@ -454,54 +481,39 @@ function analyzeImage(canvas,kind){
   var result={ok:false};
   if(m.rect && m.area>(canvas.width*canvas.height*0.03)){
     var r=m.rect;
-    // draw the detected ear region
     var ctx=canvas.getContext('2d');
     ctx.lineWidth=Math.max(2,canvas.width/160);ctx.strokeStyle='#d4b84a';
     ctx.strokeRect(r.x,r.y,r.width,r.height);
-    if(kind==='wid'){
-      // end view: ear ≈ circular. Count kernels across the widest band -> that's
-      // the visible arc; rows around ≈ that count, then ensure even.
-      var profX=projection(gray,m.mask,r,'x');
-      var across=countPeaks(profX);
-      // the end-on face shows most of the ring; scale modestly and round even
-      var rows=Math.round(across*1.6);
-      if(rows%2!==0)rows++;
-      rows=Math.min(24,Math.max(8,rows));
-      result={ok:true,value:rows,raw:across};
-    }else{
-      // side view: count bright kernel crowns down the length of one column band.
-      // Use the central third of the width (most head-on kernels) for cleaner peaks.
-      var band={x:r.x+Math.round(r.width*0.40),y:r.y,width:Math.max(4,Math.round(r.width*0.20)),height:r.height};
-      var profY=projection(gray,m.mask,band,'y');
-      var along=countPeaks(profY);
-      result={ok:true,value:Math.min(60,Math.max(8,along)),raw:along};
-    }
+    // side view: count bright kernel crowns down the central band of the ear face
+    var band={x:r.x+Math.round(r.width*0.40),y:r.y,width:Math.max(4,Math.round(r.width*0.20)),height:r.height};
+    var profY=projection(gray,m.mask,band,'y');
+    var along=countPeaks(profY);
+    result={ok:true,value:Math.min(60,Math.max(8,along)),raw:along};
   }
   src.delete();gray.delete();clahe.delete();m.mask.delete();
   return result;
 }
 
 function analyze(canvas,kind){
+  if(kind==='wid'){
+    // reference only — no counting; just confirm it loaded and prompt manual count
+    setStatus('End view saved as a reference. Pinch-zoom it and count the rows around the ring, then set <b>Rows Around</b> below (even number).');
+    return;
+  }
   try{
     var res=analyzeImage(canvas,kind);
     if(!res.ok){
-      setStatus('Could not isolate the ear from the background. Fill the frame with the ear on a plain backdrop, or set the value by hand.');
-      ge('rowsAround').removeAttribute('readonly');ge('kernelsPerRow').removeAttribute('readonly');
+      setStatus('Could not isolate the ear from the background. Fill the frame with the ear on a plain backdrop, or set kernels/row by hand.');
+      ge('kernelsPerRow').removeAttribute('readonly');
       return;
     }
-    if(kind==='wid'){
-      ge('rowsAround').value=res.value;
-      ge('rowsAround').removeAttribute('readonly');
-      setStatus('End view: counted ≈ '+res.raw+' across the face → <b>'+res.value+' rows around</b>. Verify by eye and adjust with ±.');
-    }else{
-      ge('kernelsPerRow').value=res.value;
-      ge('kernelsPerRow').removeAttribute('readonly');
-      setStatus('Side view: counted <b>'+res.value+' kernels</b> down one row. Trim tip &amp; butt with ± to leave only filled kernels.');
-    }
+    ge('kernelsPerRow').value=res.value;
+    ge('kernelsPerRow').removeAttribute('readonly');
+    setStatus('Side view: counted <b>'+res.value+' kernels</b> down one row. Trim tip &amp; butt with &minus; to leave only filled kernels.');
     recalcEar();
   }catch(err){
-    setStatus('Analysis error: '+err.message+'. Enter by hand.');
-    ge('rowsAround').removeAttribute('readonly');ge('kernelsPerRow').removeAttribute('readonly');
+    setStatus('Analysis error: '+err.message+'. Enter kernels/row by hand.');
+    ge('kernelsPerRow').removeAttribute('readonly');
   }
 }
 
@@ -554,7 +566,7 @@ ge('nav-calc').onclick=function(){calcYield();ge('resultsArea').scrollIntoView({
 function resetAll(){
   ears=[];for(var i=0;i<5;i++)ears.push(null);current=0;
   ge('rowsAround').value=16;ge('kernelsPerRow').value=36;
-  if(cvReady){ge('rowsAround').setAttribute('readonly','');ge('kernelsPerRow').setAttribute('readonly','');}
+  if(cvReady){ge('kernelsPerRow').setAttribute('readonly','');}
   ge('resultsArea').style.display='none';
   resetZone('len');resetZone('wid');recalcEar();buildTabs();
   toast('All samples cleared');
