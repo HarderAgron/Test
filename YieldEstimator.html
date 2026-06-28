@@ -364,85 +364,145 @@ function handleFile(file,kind){
 ge('fileLen').addEventListener('change',function(e){if(e.target.files[0])handleFile(e.target.files[0],'len');e.target.value='';});
 ge('fileWid').addEventListener('change',function(e){if(e.target.files[0])handleFile(e.target.files[0],'wid');e.target.value='';});
 
-/* ── OPENCV ANALYSIS ── */
-function findBlobs(canvas){
-  var src=cv.imread(canvas),gray=new cv.Mat();
-  cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
-  var clahe=new cv.CLAHE(2.0,new cv.Size(8,8));clahe.apply(gray,gray);
-  cv.GaussianBlur(gray,gray,new cv.Size(3,3),0);
-  var th=new cv.Mat();
-  cv.adaptiveThreshold(gray,th,255,cv.ADAPTIVE_THRESH_GAUSSIAN_C,cv.THRESH_BINARY_INV,25,5);
-  var k=cv.getStructuringElement(cv.MORPH_ELLIPSE,new cv.Size(3,3));
-  cv.morphologyEx(th,th,cv.MORPH_OPEN,k);cv.morphologyEx(th,th,cv.MORPH_CLOSE,k);
+/* ── OPENCV ANALYSIS ──
+   Strategy: isolate the warm-colored ear from background via HSV, crop to it,
+   then count kernels by counting peaks in the brightness projection along each
+   axis. A regular kernel grid produces evenly spaced bright bumps (kernel crowns)
+   separated by darker grooves — counting those peaks is far more robust than
+   trying to outline each kernel as a blob. */
+
+// Build a mask of the warm yellow/orange ear, return {mask, rect} cropped to it.
+function earMask(src){
+  var hsv=new cv.Mat();
+  cv.cvtColor(src,hsv,cv.COLOR_RGBA2RGB);
+  cv.cvtColor(hsv,hsv,cv.COLOR_RGB2HSV);
+  // yellow/orange kernels: hue ~10-45, decent saturation, not too dark
+  var lo=new cv.Mat(hsv.rows,hsv.cols,hsv.type(),[8,60,60,0]);
+  var hi=new cv.Mat(hsv.rows,hsv.cols,hsv.type(),[45,255,255,255]);
+  var mask=new cv.Mat();
+  cv.inRange(hsv,lo,hi,mask);
+  // clean up + keep only the largest warm region (the ear)
+  var k=cv.getStructuringElement(cv.MORPH_ELLIPSE,new cv.Size(7,7));
+  cv.morphologyEx(mask,mask,cv.MORPH_OPEN,k);
+  cv.morphologyEx(mask,mask,cv.MORPH_CLOSE,k);
   var contours=new cv.MatVector(),hier=new cv.Mat();
-  cv.findContours(th,contours,hier,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);
-  var areaImg=canvas.width*canvas.height,blobs=[];
+  cv.findContours(mask,contours,hier,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);
+  var best=-1,bestA=0,rect=null;
   for(var i=0;i<contours.size();i++){
-    var c=contours.get(i),a=cv.contourArea(c),fr=a/areaImg;
-    if(fr>0.0005&&fr<0.06){
-      var r=cv.boundingRect(c),ar=r.width/r.height;
-      if(ar>0.4&&ar<2.5)blobs.push({x:r.x+r.width/2,y:r.y+r.height/2,w:r.width,h:r.height});
-    }
-    c.delete();
+    var a=cv.contourArea(contours.get(i));
+    if(a>bestA){bestA=a;best=i;}
   }
-  var ctx=canvas.getContext('2d');ctx.lineWidth=Math.max(1.2,canvas.width/220);ctx.strokeStyle='#d4b84a';
-  blobs.forEach(function(b){ctx.strokeRect(b.x-b.w/2,b.y-b.h/2,b.w,b.h);});
-  src.delete();gray.delete();th.delete();clahe.delete();k.delete();contours.delete();hier.delete();
-  return blobs;
+  if(best>=0) rect=cv.boundingRect(contours.get(best));
+  // rebuild a clean filled mask from just the largest contour
+  var clean=cv.Mat.zeros(mask.rows,mask.cols,cv.CV_8UC1);
+  if(best>=0){var col=new cv.Scalar(255);cv.drawContours(clean,contours,best,col,-1);}
+  hsv.delete();lo.delete();hi.delete();mask.delete();k.delete();contours.delete();hier.delete();
+  return {mask:clean,rect:rect,area:bestA};
+}
+
+// Count evenly-spaced peaks in a 1-D profile (smoothed), ignoring tiny wiggles.
+function countPeaks(profile){
+  var n=profile.length;if(n<5)return 0;
+  // smooth with a small moving average
+  var sm=new Array(n),w=Math.max(1,Math.round(n/120));
+  for(var i=0;i<n;i++){var s=0,c=0;for(var j=-w;j<=w;j++){var idx=i+j;if(idx>=0&&idx<n){s+=profile[idx];c++;}}sm[i]=s/c;}
+  var mx=Math.max.apply(null,sm),mn=Math.min.apply(null,sm);
+  if(mx-mn<1e-6)return 0;
+  // normalize
+  for(var i2=0;i2<n;i2++)sm[i2]=(sm[i2]-mn)/(mx-mn);
+  // estimate dominant spacing via mean crossings to set a min-distance guard
+  var peaks=[],thr=0.45;
+  for(var i3=1;i3<n-1;i3++){
+    if(sm[i3]>thr && sm[i3]>=sm[i3-1] && sm[i3]>sm[i3+1]) peaks.push(i3);
+  }
+  // merge peaks closer than a fraction of the median gap (dedupe plateaus)
+  if(peaks.length>2){
+    var gaps=[];for(var g=1;g<peaks.length;g++)gaps.push(peaks[g]-peaks[g-1]);
+    gaps.sort(function(a,b){return a-b;});
+    var medGap=gaps[Math.floor(gaps.length/2)]||1;
+    var minD=medGap*0.55;
+    var merged=[peaks[0]];
+    for(var p=1;p<peaks.length;p++){if(peaks[p]-merged[merged.length-1]>=minD)merged.push(peaks[p]);}
+    peaks=merged;
+  }
+  return peaks.length;
+}
+
+// brightness projection (sum of grayscale within mask) along an axis
+function projection(gray,mask,rect,axis){
+  // axis 'x' -> profile across columns (length = rect.width)
+  // axis 'y' -> profile down rows (length = rect.height)
+  var len=axis==='x'?rect.width:rect.height,oth=axis==='x'?rect.height:rect.width;
+  var prof=new Array(len);
+  for(var a=0;a<len;a++){
+    var sum=0,cnt=0;
+    for(var b=0;b<oth;b++){
+      var px=axis==='x'?(rect.x+a):(rect.x+b);
+      var py=axis==='x'?(rect.y+b):(rect.y+a);
+      if(mask.ucharPtr(py,px)[0]>0){sum+=gray.ucharPtr(py,px)[0];cnt++;}
+    }
+    prof[a]=cnt>0?sum/cnt:0;
+  }
+  return prof;
+}
+
+function analyzeImage(canvas,kind){
+  var src=cv.imread(canvas);
+  var gray=new cv.Mat();cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
+  var clahe=new cv.CLAHE(2.0,new cv.Size(8,8));clahe.apply(gray,gray);
+  var m=earMask(src);
+  var result={ok:false};
+  if(m.rect && m.area>(canvas.width*canvas.height*0.03)){
+    var r=m.rect;
+    // draw the detected ear region
+    var ctx=canvas.getContext('2d');
+    ctx.lineWidth=Math.max(2,canvas.width/160);ctx.strokeStyle='#d4b84a';
+    ctx.strokeRect(r.x,r.y,r.width,r.height);
+    if(kind==='wid'){
+      // end view: ear ≈ circular. Count kernels across the widest band -> that's
+      // the visible arc; rows around ≈ that count, then ensure even.
+      var profX=projection(gray,m.mask,r,'x');
+      var across=countPeaks(profX);
+      // the end-on face shows most of the ring; scale modestly and round even
+      var rows=Math.round(across*1.6);
+      if(rows%2!==0)rows++;
+      rows=Math.min(24,Math.max(8,rows));
+      result={ok:true,value:rows,raw:across};
+    }else{
+      // side view: count bright kernel crowns down the length of one column band.
+      // Use the central third of the width (most head-on kernels) for cleaner peaks.
+      var band={x:r.x+Math.round(r.width*0.40),y:r.y,width:Math.max(4,Math.round(r.width*0.20)),height:r.height};
+      var profY=projection(gray,m.mask,band,'y');
+      var along=countPeaks(profY);
+      result={ok:true,value:Math.min(60,Math.max(8,along)),raw:along};
+    }
+  }
+  src.delete();gray.delete();clahe.delete();m.mask.delete();
+  return result;
 }
 
 function analyze(canvas,kind){
   try{
-    var blobs=findBlobs(canvas);
-    if(blobs.length<12){
-      setStatus('Pattern unclear ('+blobs.length+' kernels). Adjust lighting/angle or set the value by hand.');
+    var res=analyzeImage(canvas,kind);
+    if(!res.ok){
+      setStatus('Could not isolate the ear from the background. Fill the frame with the ear on a plain backdrop, or set the value by hand.');
       ge('rowsAround').removeAttribute('readonly');ge('kernelsPerRow').removeAttribute('readonly');
       return;
     }
     if(kind==='wid'){
-      // rows around: count distinct kernel columns across the cob face, double for full circumference
-      var rows=estimateAcross(blobs);
-      ge('rowsAround').value=rows;
+      ge('rowsAround').value=res.value;
       ge('rowsAround').removeAttribute('readonly');
-      setStatus('End view: ≈ '+blobs.length+' kernels → <b>'+rows+' rows around</b>. Adjust with ± if needed.');
+      setStatus('End view: counted ≈ '+res.raw+' across the face → <b>'+res.value+' rows around</b>. Verify by eye and adjust with ±.');
     }else{
-      // kernels per row: count distinct kernel positions along the longest axis
-      var kpr=estimateAlong(blobs);
-      ge('kernelsPerRow').value=kpr;
+      ge('kernelsPerRow').value=res.value;
       ge('kernelsPerRow').removeAttribute('readonly');
-      setStatus('Side view: ≈ '+blobs.length+' kernels → <b>'+kpr+' per row</b>. Exclude tip/butt with ± if needed.');
+      setStatus('Side view: counted <b>'+res.value+' kernels</b> down one row. Trim tip &amp; butt with ± to leave only filled kernels.');
     }
     recalcEar();
   }catch(err){
     setStatus('Analysis error: '+err.message+'. Enter by hand.');
     ge('rowsAround').removeAttribute('readonly');ge('kernelsPerRow').removeAttribute('readonly');
   }
-}
-
-// distinct columns across the shorter (width) axis → rows around the cob
-function estimateAcross(blobs){
-  var xs=blobs.map(function(b){return b.x;}),ys=blobs.map(function(b){return b.y;});
-  var spanX=Math.max.apply(null,xs)-Math.min.apply(null,xs);
-  var spanY=Math.max.apply(null,ys)-Math.min.apply(null,ys);
-  var ws=blobs.map(function(b){return b.w;}).sort(function(a,b){return a-b;});
-  var mw=ws[Math.floor(ws.length/2)]||1;
-  // width axis is the shorter span on an end-on shot
-  var widthSpan=Math.min(spanX,spanY);
-  var across=Math.round(widthSpan/(mw*1.05))+1;
-  var rows=Math.round(across*2);          // visible face ≈ half the circumference
-  if(rows%2!==0)rows++;
-  return Math.min(24,Math.max(8,rows));
-}
-// distinct positions along the longer (length) axis → kernels per row
-function estimateAlong(blobs){
-  var xs=blobs.map(function(b){return b.x;}),ys=blobs.map(function(b){return b.y;});
-  var spanX=Math.max.apply(null,xs)-Math.min.apply(null,xs);
-  var spanY=Math.max.apply(null,ys)-Math.min.apply(null,ys);
-  var hs=blobs.map(function(b){return b.h;}).sort(function(a,b){return a-b;});
-  var mh=hs[Math.floor(hs.length/2)]||1;
-  var lengthSpan=Math.max(spanX,spanY);
-  var along=Math.round(lengthSpan/(mh*1.05))+1;
-  return Math.min(60,Math.max(10,along));
 }
 
 /* ── SAVE ── */
