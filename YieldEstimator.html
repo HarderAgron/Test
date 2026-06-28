@@ -246,20 +246,44 @@ var cvReady=false;
 function setEng(state,txt){var p=ge('tb-eng');p.className=state;p.textContent=txt;}
 (function preloadCV(){
   setEng('','ENGINE…');
-  var s=document.createElement('script');
-  s.src='https://docs.opencv.org/4.10.0/opencv.js';
-  s.async=true;
-  s.onload=function(){
-    if(window.cv && cv.Mat){cvReady=true;setEng('ready','VISION ✓');}
-    else{cv['onRuntimeInitialized']=function(){cvReady=true;setEng('ready','VISION ✓');};}
-  };
-  s.onerror=function(){
+  function ok(){
+    // OpenCV may be ready immediately, or expose a Promise/Module that finishes async.
+    function ready(){cvReady=true;setEng('ready','VISION ✓');}
+    if(window.cv && typeof cv.then==='function'){           // some builds export a Promise
+      cv.then(function(real){window.cv=real;ready();});
+      return;
+    }
+    if(window.cv && cv.Mat){ready();return;}
+    if(window.cv){cv['onRuntimeInitialized']=ready;return;}
+    // Module global without cv yet
+    var tries=0,iv=setInterval(function(){
+      tries++;
+      if(window.cv && cv.Mat){clearInterval(iv);ready();}
+      else if(tries>120){clearInterval(iv);fail();}   // ~30s ceiling
+    },250);
+  }
+  function fail(){
     setEng('fail','MANUAL');
-    setStatus('Vision engine unavailable (needs https hosting / connection). You can still enter rows &amp; kernels/row by hand — the yield math works the same.');
+    setStatus('Vision engine unavailable. You can still enter rows &amp; kernels/row by hand — the yield math works the same.');
     ge('rowsAround').removeAttribute('readonly');
     ge('kernelsPerRow').removeAttribute('readonly');
-  };
-  document.body.appendChild(s);
+  }
+  // Load OpenCV.js, trying known-good URLs in order.
+  var SOURCES=[
+    'opencv.js',                                                  // local copy in repo (best for field use)
+    'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js',
+    'https://docs.opencv.org/4.x/opencv.js'                       // official latest build
+  ];
+  function tryLoad(i){
+    if(i>=SOURCES.length){fail();return;}
+    var sc=document.createElement('script');
+    sc.src=SOURCES[i];
+    sc.async=true;
+    sc.onload=ok;
+    sc.onerror=function(){tryLoad(i+1);};
+    document.body.appendChild(sc);
+  }
+  tryLoad(0);
 })();
 
 /* ── STATE ── */
