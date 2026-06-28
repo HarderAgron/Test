@@ -217,6 +217,28 @@ html,body{height:100%;overflow:hidden;background:#ddd6c4;font-family:"Source Ser
       </div>
     </div>
     <div class="ear-summary" id="earSummary"></div>
+    <div class="card" style="margin-top:0;">
+      <div class="row2">
+        <div class="fg"><label>Grower</label><input type="text" id="grower" placeholder="Name"></div>
+        <div class="fg"><label>Field</label><input type="text" id="field" placeholder="Field ID"></div>
+      </div>
+      <button class="savebtn" id="dlReportBtn">Download Yield Report (JPG)</button>
+    </div>
+  </div>
+
+  <!-- TRAINING DATA CAPTURE -->
+  <div class="card">
+    <div class="ctitle"><span>Training Data</span><span class="step">Build the model</span></div>
+    <div class="info-row">
+      <div class="info-text">Each saved ear keeps its two photos labeled with your <b>rows</b> and <b>kernels/row</b> counts. Export them as you scout to build a Burrus dataset for a future auto-count model. Nothing is uploaded — the file saves to your phone.</div>
+    </div>
+    <div class="fg">
+      <label>Hybrid / Field Tag (optional)</label>
+      <input type="text" id="trainTag" placeholder="e.g. 7T27 / North 40" autocapitalize="characters">
+      <div class="hint" id="captureCount">0 ears captured this session.</div>
+    </div>
+    <button class="savebtn" id="exportTrainBtn">Export Training Set (.zip-free bundle)</button>
+    <div class="hint" style="margin-top:8px;">Exports an HTML bundle with every ear's photos + labels, openable on a computer and ready to label-check. Keep these in a Burrus folder; once you have ~300 ears we train the in-browser model.</div>
   </div>
 
   <button class="rstbtn" id="resetBtn">Reset All Samples</button>
@@ -315,6 +337,7 @@ function loadEar(i){
   var e=ears[i];
   ge('rowsAround').value=e?e.rows:16;
   ge('kernelsPerRow').value=e?e.kpr:36;
+  lenFullSrc=null;widFullSrc=null;
   resetZone('len');resetZone('wid');
   recalcEar();buildTabs();
 }
@@ -350,6 +373,7 @@ ge('zoneLen').onclick=function(){ge('fileLen').click();};
 ge('zoneWid').onclick=function(){ge('fileWid').click();};
 
 var widFullSrc=null; // full-res data URL of the current end photo, for zoom
+var lenFullSrc=null; // full-res data URL of the current side photo (training capture)
 
 function handleFile(file,kind){
   var img=new Image();
@@ -362,12 +386,16 @@ function handleFile(file,kind){
     cvs.getContext('2d').drawImage(img,0,0,cvs.width,cvs.height);
     z.appendChild(cvs);
     var badge=document.createElement('div');badge.className='detect-badge';badge.textContent=kind==='len'?'LENGTH':'TAP TO ZOOM';z.appendChild(badge);
+    // keep a clean (pre-overlay) copy of the photo for training capture
+    var clean=document.createElement('canvas');clean.width=cvs.width;clean.height=cvs.height;
+    clean.getContext('2d').drawImage(img,0,0,clean.width,clean.height);
     if(kind==='wid'){
-      widFullSrc=cvs.toDataURL('image/jpeg',0.9);
-      z.onclick=function(){openZoom(widFullSrc);};
+      widFullSrc=clean.toDataURL('image/jpeg',0.85);
+      z.onclick=function(){openZoom(cvs.toDataURL('image/jpeg',0.9));};
       analyze(cvs,'wid');
       return;
     }
+    lenFullSrc=clean.toDataURL('image/jpeg',0.85);
     if(!cvReady){
       setStatus('Photo loaded. Vision engine not ready — enter kernels/row by hand.');
       ge('kernelsPerRow').removeAttribute('readonly');
@@ -521,9 +549,9 @@ function analyze(canvas,kind){
 ge('saveEarBtn').addEventListener('click',function(){
   var r=parseInt(ge('rowsAround').value)||0,k=parseInt(ge('kernelsPerRow').value)||0;
   if(r<8||k<10){toast('Set rows and kernels/row first');return;}
-  ears[current]={rows:r,kpr:k,kernels:r*k};
+  ears[current]={rows:r,kpr:k,kernels:r*k,lenImg:lenFullSrc,widImg:widFullSrc};
   toast('Ear '+(current+1)+' saved');
-  buildTabs();
+  buildTabs();updateCaptureCount();
   var next=-1;for(var i=0;i<5;i++){if(!ears[i]){next=i;break;}}
   if(next>=0)loadEar(next);
   else{calcYield();ge('resultsArea').scrollIntoView({behavior:'smooth'});}
@@ -568,13 +596,127 @@ function resetAll(){
   ge('rowsAround').value=16;ge('kernelsPerRow').value=36;
   if(cvReady){ge('kernelsPerRow').setAttribute('readonly','');}
   ge('resultsArea').style.display='none';
-  resetZone('len');resetZone('wid');recalcEar();buildTabs();
+  lenFullSrc=null;widFullSrc=null;
+  resetZone('len');resetZone('wid');recalcEar();buildTabs();updateCaptureCount();
   toast('All samples cleared');
 }
 ge('resetBtn').onclick=resetAll;ge('nav-reset').onclick=resetAll;
 
+/* ── TRAINING CAPTURE ── */
+function capturedEars(){return ears.filter(function(e){return e&&(e.lenImg||e.widImg);});}
+function updateCaptureCount(){
+  var c=capturedEars().length;
+  ge('captureCount').textContent=c+(c===1?' ear':' ears')+' captured this session.';
+}
+ge('exportTrainBtn').addEventListener('click',function(){
+  var cap=capturedEars();
+  if(!cap.length){toast('Save an ear with photos first');return;}
+  var tag=(ge('trainTag').value||'').trim();
+  var stamp=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+  // build a manifest + a self-contained viewer/exporter HTML
+  var records=cap.map(function(e,i){
+    return {idx:i+1,tag:tag,rows:e.rows,kpr:e.kpr,kernels:e.kernels,
+            endPhoto:e.widImg||null,sidePhoto:e.lenImg||null};
+  });
+  var manifest={created:stamp,tag:tag,count:records.length,records:records};
+  var json=JSON.stringify(manifest);
+  var html=''
+    +'<!DOCTYPE html><html><head><meta charset="utf-8"><title>Burrus Training Capture '+stamp+'</title>'
+    +'<style>body{font-family:system-ui,sans-serif;background:#1c1a16;color:#f2ece0;margin:0;padding:18px}'
+    +'h1{font-size:16px;color:#d4b84a}.rec{display:flex;gap:14px;background:#252018;border:1px solid #b8972a;border-radius:8px;padding:12px;margin:12px 0;align-items:center;flex-wrap:wrap}'
+    +'.rec img{height:160px;border-radius:6px;background:#000}.lbl{font-family:monospace;font-size:13px;line-height:1.7}'
+    +'.lbl b{color:#d4b84a}.tag{color:#9bd49e}button{background:#b8972a;color:#1c1a16;border:none;border-radius:6px;padding:10px 16px;font-weight:700;cursor:pointer;font-family:monospace}</style></head><body>'
+    +'<h1>BURRUS — Ear-End Training Capture</h1>'
+    +'<p style="font-family:monospace;font-size:12px">Created '+stamp+(tag?(' &middot; '+tag):'')+' &middot; '+records.length+' ears. '
+    +'Each record pairs the end photo (for rows-around) and side photo (for kernels/row) with your hand counts. '
+    +'Accumulate these; once ~300 ears are gathered they become the training set for the in-browser model.</p>'
+    +'<button onclick="dl()">Download manifest.json</button><div id="list"></div>'
+    +'<script>var M='+json+';'
+    +'var L=document.getElementById("list");M.records.forEach(function(r){'
+    +'var d=document.createElement("div");d.className="rec";'
+    +'var imgs="";if(r.endPhoto)imgs+=\'<img src="\'+r.endPhoto+\'">\';if(r.sidePhoto)imgs+=\'<img src="\'+r.sidePhoto+\'">\';'
+    +'d.innerHTML=imgs+\'<div class="lbl">Ear #\'+r.idx+(r.tag?\' <span class=tag>[\'+r.tag+\']</span>\':\'\')+\'<br><b>Rows around:</b> \'+r.rows+\'<br><b>Kernels/row:</b> \'+r.kpr+\'<br><b>Total:</b> \'+r.kernels+\' kernels</div>\';'
+    +'L.appendChild(d);});'
+    +'function dl(){var b=new Blob([JSON.stringify(M,null,2)],{type:"application/json"});var a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="burrus-training-'+stamp+'.json";a.click();}'
+    +'<\/script></body></html>';
+  var blob=new Blob([html],{type:'text/html'});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='burrus-training-'+stamp+'.html';
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  toast('Exported '+records.length+' labeled ears');
+});
+
+/* ── JPG FIELD REPORT ── */
+function drawReport(){
+  var saved=ears.filter(function(e){return e;});
+  var W=1080,H=1350,cv=document.createElement('canvas');cv.width=W;cv.height=H;
+  var x=cv.getContext('2d');
+  x.fillStyle='#f2ece0';x.fillRect(0,0,W,H);
+  // header
+  x.fillStyle='#252018';x.fillRect(0,0,W,150);
+  x.fillStyle='#d4b84a';x.font='900 52px Georgia';x.fillText('BURRUS',48,95);
+  x.fillStyle='#b8972a';x.font='600 20px monospace';x.fillText('CORN YIELD ESTIMATE',50,128);
+  x.strokeStyle='#b8972a';x.lineWidth=3;x.beginPath();x.moveTo(0,150);x.lineTo(W,150);x.stroke();
+  // meta
+  var g=(ge('grower').value||'—'),f=(ge('field').value||'—');
+  x.fillStyle='#7a6a4a';x.font='500 22px monospace';
+  x.fillText('Grower: '+g,48,200);x.fillText('Field: '+f,48,234);
+  x.fillText(new Date().toLocaleDateString(),48,268);
+  // big yield
+  x.fillStyle='#252018';x.fillRect(48,300,W-96,220);
+  x.strokeStyle='#b8972a';x.lineWidth=2;x.strokeRect(48,300,W-96,220);
+  x.fillStyle='rgba(184,151,42,0.7)';x.font='600 22px monospace';x.textAlign='center';
+  x.fillText('ESTIMATED YIELD',W/2,355);
+  x.fillStyle='#d4b84a';x.font='900 120px Georgia';
+  x.fillText(ge('yieldVal').textContent,W/2,470);
+  x.fillStyle='rgba(184,151,42,0.6)';x.font='500 24px monospace';
+  x.fillText('bushels per acre',W/2,505);
+  x.textAlign='left';
+  // stats row
+  x.fillStyle='#1c1a16';x.font='600 26px monospace';
+  x.fillText('Avg kernels/ear:  '+ge('avgKernVal').textContent,48,580);
+  x.fillText('Ears/acre:  '+(parseInt(ge('earsPerAcre').value)||0).toLocaleString(),48,620);
+  x.fillText('Kernels/bushel:  '+(parseInt(ge('kernelsPerBu').value)||80000).toLocaleString(),48,660);
+  // per-ear table
+  x.fillStyle='#252018';x.fillRect(48,700,W-96,60);
+  x.fillStyle='#d4b84a';x.font='600 22px monospace';x.fillText('PER-EAR BREAKDOWN',70,738);
+  var yy=800;x.font='500 24px monospace';
+  ears.forEach(function(e,i){
+    if(!e)return;
+    x.fillStyle='#1c1a16';
+    x.fillText('Ear '+(i+1)+'   '+e.rows+' rows × '+e.kpr+'/row',70,yy);
+    x.fillStyle='#8a6f1e';x.textAlign='right';
+    x.fillText(e.kernels.toLocaleString()+' kernels',W-70,yy);
+    x.textAlign='left';
+    x.strokeStyle='#d0c49a';x.lineWidth=1;x.beginPath();x.moveTo(48,yy+18);x.lineTo(W-48,yy+18);x.stroke();
+    yy+=58;
+  });
+  var avg=saved.length?Math.round(saved.reduce(function(s,e){return s+e.kernels;},0)/saved.length):0;
+  x.fillStyle='#f5ede0';x.fillRect(48,yy-32,W-96,52);
+  x.fillStyle='#1c1a16';x.font='700 24px monospace';x.fillText('Average',70,yy);
+  x.textAlign='right';x.fillText(avg.toLocaleString()+' kernels/ear',W-70,yy);x.textAlign='left';
+  // footer
+  x.fillStyle='#7a6a4a';x.font='400 18px monospace';
+  x.fillText('Estimate only. Based on '+saved.length+'-ear sample at '+(parseInt(ge('kernelsPerBu').value)||80000).toLocaleString()+' kernels/bu.',48,H-60);
+  x.fillText('Burrus Field Tools',48,H-32);
+  return cv;
+}
+ge('dlReportBtn').addEventListener('click',function(){
+  if(!ears.filter(function(e){return e;}).length){toast('Calculate a yield first');return;}
+  toast('Rendering report…');
+  setTimeout(function(){
+    try{
+      var cv=drawReport();
+      var fname='yield-'+((ge('grower').value||'report').replace(/\s+/g,'-').toLowerCase())+'-'+((ge('field').value||'field').replace(/\s+/g,'-').toLowerCase())+'.jpg';
+      var a=document.createElement('a');a.href=cv.toDataURL('image/jpeg',0.92);a.download=fname;
+      document.body.appendChild(a);a.click();document.body.removeChild(a);
+    }catch(e){toast('Error: '+e.message);}
+  },120);
+});
+
 /* init */
-buildTabs();autoEPA();recalcEar();
+buildTabs();autoEPA();recalcEar();updateCaptureCount();
 </script>
 </body>
 </html>
