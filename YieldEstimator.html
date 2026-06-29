@@ -106,10 +106,10 @@ html,body{height:100%;overflow:hidden;background:#ddd6c4;font-family:"Source Ser
   <div class="card">
     <div class="ctitle"><span>Stand Count</span><span class="step">Step 1</span></div>
     <div class="info-row">
-      <div class="info-text">Walk off <b>17 ft 5 in (17.4 ft)</b> of a single row and count every ear. At 30-inch rows this is 1/1,000th acre, so ears &times; 1,000 = ears per acre.</div>
+      <div class="info-text">Walk off the row length shown for your spacing (that's 1/1,000th acre), count every ear in it, then ears &times; 1,000 = ears per acre.</div>
     </div>
     <div class="fg">
-      <label>Ears in 17.4 ft</label>
+      <label id="earsCountedLabel">Ears in 17.4 ft</label>
       <div class="stepper">
         <button class="minus" id="ears-minus">&minus;</button>
         <input type="number" id="earsCounted" inputmode="numeric" value="32">
@@ -119,10 +119,9 @@ html,body{height:100%;overflow:hidden;background:#ddd6c4;font-family:"Source Ser
     <div class="fg">
       <label>Row Spacing</label>
       <div class="seg" id="seg-rowspace">
+        <button class="seg-btn" data-val="15">15"</button>
         <button class="seg-btn" data-val="20">20"</button>
         <button class="seg-btn on" data-val="30">30"</button>
-        <button class="seg-btn" data-val="36">36"</button>
-        <button class="seg-btn" data-val="38">38"</button>
       </div>
     </div>
     <div class="fg">
@@ -168,7 +167,7 @@ html,body{height:100%;overflow:hidden;background:#ddd6c4;font-family:"Source Ser
       <label>Kernels Per Row (tip &amp; butt excluded)</label>
       <div class="stepper">
         <button class="minus" id="kpr-minus">&minus;</button>
-        <input type="number" id="kernelsPerRow" inputmode="numeric" value="36" readonly>
+        <input type="number" id="kernelsPerRow" inputmode="numeric" value="36">
         <button class="plus" id="kpr-plus">+</button>
       </div>
       <div class="hint">From side view. Skip nubbin tip &amp; crowded butt.</div>
@@ -381,11 +380,15 @@ function showStored(kind,dataUrl){
 /* ── STAND COUNT ── */
 function rowSpace(){var b=document.querySelector('#seg-rowspace .seg-btn.on');return b?parseInt(b.dataset.val):30;}
 function autoEPA(){
-  var ears17=parseInt(ge('earsCounted').value)||0;
-  var lengthFt=522.7/(rowSpace()/12);
-  var perAcre=Math.round(ears17*1000*(17.4/lengthFt));
+  var ears=parseInt(ge('earsCounted').value)||0;
+  var sp=rowSpace();
+  // 1/1000 acre row length (ft) = 43.56 sq ft / (row width in ft)
+  var lenFt=43.56/(sp/12);
+  var perAcre=Math.round(ears*1000);   // ears counted in 1/1000 acre × 1000
   ge('earsPerAcre').value=perAcre;
-  ge('epa-hint').textContent='≈ '+perAcre.toLocaleString()+' ears/ac from '+ears17+' ears in '+lengthFt.toFixed(1)+' ft of '+rowSpace()+'" row.';
+  var ft=Math.floor(lenFt), inch=Math.round((lenFt-ft)*12);
+  ge('earsCountedLabel').textContent='Ears in '+lenFt.toFixed(1)+' ft';
+  ge('epa-hint').textContent='Walk '+ft+' ft '+inch+' in of '+sp+'" row = 1/1,000 ac. '+ears+' ears → '+perAcre.toLocaleString()+' ears/ac.';
 }
 
 /* ── KERNEL MATH ── */
@@ -790,7 +793,6 @@ function resetAll(){
   ears=[];for(var i=0;i<5;i++)ears.push(null);current=0;
   earPhotos=[];for(var i=0;i<5;i++)earPhotos.push({len:null,wid:null});
   ge('rowsAround').value=16;ge('kernelsPerRow').value=36;
-  if(cvReady){ge('kernelsPerRow').setAttribute('readonly','');}
   ge('resultsArea').style.display='none';
   lenFullSrc=null;widFullSrc=null;
   resetZone('len');resetZone('wid');recalcEar();buildTabs();updateCaptureCount();
