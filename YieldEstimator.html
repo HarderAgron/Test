@@ -595,7 +595,11 @@ var GEM_PROMPT=
 "You are given two photos of ONE corn ear: a SIDE view (length) and an END view (rows around). "+
 "From the SIDE view: identify each fully-filled kernel row that is clearly visible on the face. "+
 "Count the filled kernels in EACH visible row, EXCLUDING the small/partial kernels at the nubbin tip and the crowded irregular kernels at the butt end. "+
-"From the END view: count the total number of kernel rows going around the full circumference of the cob; this must be an even number. "+
+"From the END view: count the TOTAL number of kernel rows going all the way around the full 360-degree circumference of the cob. "+
+"CRITICAL: this is a 3D cob photographed end-on, so the kernels on the FAR side of the ring curve away from the camera and appear small, dark, foreshortened, and partially hidden. You MUST count those far-side and edge rows too, not just the bright ones facing the camera. "+
+"Most dent corn has between 14 and 22 rows, and the count is always an EVEN number. "+
+"A reliable method: carefully count the rows across the visible near half of the ring, then DOUBLE that number, since a corn ear is radially symmetric and the hidden far half has the same number of rows as the near half. "+
+"If your initial count seems low (e.g. 12 or 14), re-examine the dim edges of the ring for rows you may have missed, then round UP to the nearest even number. "+
 "Return ONLY a JSON object, no markdown, no prose, exactly: "+
 '{"rows_around": <even integer>, "per_row_counts": [<int>,...], "avg_kernels_per_row": <integer rounded to nearest kernel>}. '+
 "avg_kernels_per_row must equal the mean of per_row_counts rounded to the nearest whole number.";
