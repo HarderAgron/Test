@@ -182,6 +182,21 @@ html,body{height:100%;overflow:hidden;background:#ddd6c4;font-family:"Source Ser
     <button class="savebtn" id="saveEarBtn" style="margin-top:12px;">Save Ear &amp; Next &rarr;</button>
   </div>
 
+  <!-- GEMINI AI ANALYSIS -->
+  <div class="card">
+    <div class="ctitle"><span>AI Kernel Count</span><span class="step">Gemini Flash</span></div>
+    <div class="info-row">
+      <div class="info-text">Load both photos for as many of the 5 ears as you can, then run one pass. Gemini counts kernels in each visible row, averages them to the nearest kernel (tip &amp; butt excluded), and reads rows-around from the end photo. Every number stays editable after.</div>
+    </div>
+    <div class="fg">
+      <label>Gemini API Key</label>
+      <input type="password" id="gemKey" placeholder="Paste key — stored on this device only" autocomplete="off">
+      <div class="hint" id="gemKeyHint">Stored locally in this browser, never uploaded or shared. <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--gold-d);">Get a key</a>.</div>
+    </div>
+    <button class="savebtn" id="analyzeAllBtn">Analyze All Loaded Ears</button>
+    <div class="cv-status" id="gemStatus" style="margin-top:8px;"></div>
+  </div>
+
   <!-- HYBRID -->
   <div class="card">
     <div class="ctitle"><span>Hybrid</span><span class="step">Optional</span></div>
@@ -318,6 +333,7 @@ function setEng(state,txt){var p=ge('tb-eng');p.className=state;p.textContent=tx
 
 /* ── STATE ── */
 var ears=[];for(var i=0;i<5;i++)ears.push(null); // {rows,kpr,kernels}
+var earPhotos=[];for(var i=0;i<5;i++)earPhotos.push({len:null,wid:null}); // raw photos per ear for AI
 var current=0;
 
 /* ── TABS ── */
@@ -335,11 +351,31 @@ function loadEar(i){
   if(ears[current]){ears[current].rows=parseInt(ge('rowsAround').value)||0;ears[current].kpr=parseInt(ge('kernelsPerRow').value)||0;ears[current].kernels=ears[current].rows*ears[current].kpr;}
   current=i;
   var e=ears[i];
-  ge('rowsAround').value=e?e.rows:16;
-  ge('kernelsPerRow').value=e?e.kpr:36;
+  ge('rowsAround').value=e?e.rows:(earPhotos[i].aiRows||16);
+  ge('kernelsPerRow').value=e?e.kpr:(earPhotos[i].aiKpr||36);
+  if(earPhotos[i].aiKpr&&!e)ge('kernelsPerRow').removeAttribute('readonly');
+  // hard-reset globals + both photo zones BEFORE restoring this ear's photos
   lenFullSrc=null;widFullSrc=null;
   resetZone('len');resetZone('wid');
+  // now restore only THIS ear's stored photos
+  lenFullSrc=earPhotos[i].len||null;
+  widFullSrc=earPhotos[i].wid||null;
+  if(earPhotos[i].len)showStored('len',earPhotos[i].len);
+  if(earPhotos[i].wid)showStored('wid',earPhotos[i].wid);
   recalcEar();buildTabs();
+}
+function showStored(kind,dataUrl){
+  var z=zoneEl(kind);z.innerHTML='';
+  var im=document.createElement('img');im.src=dataUrl;im.style.maxWidth='100%';im.style.height='auto';im.style.display='block';
+  z.appendChild(im);
+  var badge=document.createElement('div');badge.className='detect-badge';badge.textContent=kind==='len'?'LENGTH':'TAP TO ZOOM';z.appendChild(badge);
+  // re-take button (top-right) so a filled slot is always replaceable
+  var rt=document.createElement('div');
+  rt.textContent='RETAKE';
+  rt.style.cssText='position:absolute;top:6px;right:6px;background:rgba(28,26,22,.85);color:#d4b84a;font-family:monospace;font-size:8px;font-weight:700;padding:3px 7px;border-radius:5px;cursor:pointer;';
+  rt.onclick=function(ev){ev.stopPropagation();ge(kind==='len'?'fileLen':'fileWid').click();};
+  z.appendChild(rt);
+  z.onclick=(kind==='wid')?function(){openZoom(dataUrl);}:function(){ge('fileLen').click();};
 }
 
 /* ── STAND COUNT ── */
@@ -368,41 +404,40 @@ function resetZone(kind){
   z.innerHTML=kind==='len'
     ?'<div class="pz-empty-txt"><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg><br>Side view<br>for kernels/row</div>'
     :'<div class="pz-empty-txt"><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg><br>End view<br>zoom &amp; count rows</div>';
+  // (re)bind the upload handler every time the zone is emptied, for every ear
+  z.onclick=function(){ge(kind==='len'?'fileLen':'fileWid').click();};
 }
-ge('zoneLen').onclick=function(){ge('fileLen').click();};
-ge('zoneWid').onclick=function(){ge('fileWid').click();};
 
 var widFullSrc=null; // full-res data URL of the current end photo, for zoom
 var lenFullSrc=null; // full-res data URL of the current side photo (training capture)
 
 function handleFile(file,kind){
   var img=new Image();
+  var earAtCapture=current; // lock the target ear at capture time (async-safe)
   img.onload=function(){
-    var z=zoneEl(kind);z.innerHTML='';
-    var cvs=document.createElement('canvas');
-    // render width photo larger so the ring is countable without zooming out
     var maxW=kind==='wid'?460:300,sc=Math.min(1,maxW/img.width);
-    cvs.width=img.width*sc;cvs.height=img.height*sc;
-    cvs.getContext('2d').drawImage(img,0,0,cvs.width,cvs.height);
-    z.appendChild(cvs);
-    var badge=document.createElement('div');badge.className='detect-badge';badge.textContent=kind==='len'?'LENGTH':'TAP TO ZOOM';z.appendChild(badge);
-    // keep a clean (pre-overlay) copy of the photo for training capture
-    var clean=document.createElement('canvas');clean.width=cvs.width;clean.height=cvs.height;
+    var clean=document.createElement('canvas');
+    clean.width=img.width*sc;clean.height=img.height*sc;
     clean.getContext('2d').drawImage(img,0,0,clean.width,clean.height);
-    if(kind==='wid'){
-      widFullSrc=clean.toDataURL('image/jpeg',0.85);
-      z.onclick=function(){openZoom(cvs.toDataURL('image/jpeg',0.9));};
-      analyze(cvs,'wid');
-      return;
+    var dataUrl=clean.toDataURL('image/jpeg',0.85);
+    earPhotos[earAtCapture][kind]=dataUrl;
+    // only update the visible zone if we're still on the ear that was captured
+    if(earAtCapture===current){
+      if(kind==='wid')widFullSrc=dataUrl;else lenFullSrc=dataUrl;
+      showStored(kind,dataUrl);
     }
-    lenFullSrc=clean.toDataURL('image/jpeg',0.85);
-    if(!cvReady){
-      setStatus('Photo loaded. Vision engine not ready — enter kernels/row by hand.');
-      ge('kernelsPerRow').removeAttribute('readonly');
-      return;
+    var haveKey=!!(ge('gemKey').value||'').trim();
+    if(haveKey){
+      setStatus('Photo loaded for Ear '+(earAtCapture+1)+'. Load the rest, then tap “Analyze All Loaded Ears.”');
+    }else if(kind==='len'){
+      if(cvReady){
+        setStatus('<span class="spinner"></span>Counting kernels (offline)…');
+        var tmp=document.createElement('canvas');tmp.width=clean.width;tmp.height=clean.height;tmp.getContext('2d').drawImage(clean,0,0);
+        setTimeout(function(){analyze(tmp,'len');},50);
+      }else{ge('kernelsPerRow').removeAttribute('readonly');setStatus('Photo loaded. Add a Gemini key for AI counting, or enter kernels/row by hand.');}
+    }else{
+      setStatus('End photo loaded. Tap it to zoom and count rows, or add a Gemini key to auto-count.');
     }
-    setStatus('<span class="spinner"></span>Counting kernels down the row…');
-    setTimeout(function(){analyze(cvs,'len');},50);
   };
   img.src=URL.createObjectURL(file);
 }
@@ -545,6 +580,89 @@ function analyze(canvas,kind){
   }
 }
 
+/* ── GEMINI BATCH ANALYSIS ── */
+// persist key locally (NOT in artifact storage rules — this is a hosted file)
+try{var sk=localStorage.getItem('burrusGemKey');if(sk)ge('gemKey').value=sk;}catch(e){}
+ge('gemKey').addEventListener('change',function(){try{localStorage.setItem('burrusGemKey',this.value.trim());}catch(e){}});
+
+function gemStatus(html){ge('gemStatus').innerHTML=html;}
+
+// strip the "data:image/jpeg;base64," prefix
+function b64(dataUrl){return dataUrl.split(',')[1];}
+
+var GEM_PROMPT=
+"You are an agronomist counting corn kernels for a yield estimate. "+
+"You are given two photos of ONE corn ear: a SIDE view (length) and an END view (rows around). "+
+"From the SIDE view: identify each fully-filled kernel row that is clearly visible on the face. "+
+"Count the filled kernels in EACH visible row, EXCLUDING the small/partial kernels at the nubbin tip and the crowded irregular kernels at the butt end. "+
+"From the END view: count the total number of kernel rows going around the full circumference of the cob; this must be an even number. "+
+"Return ONLY a JSON object, no markdown, no prose, exactly: "+
+'{"rows_around": <even integer>, "per_row_counts": [<int>,...], "avg_kernels_per_row": <integer rounded to nearest kernel>}. '+
+"avg_kernels_per_row must equal the mean of per_row_counts rounded to the nearest whole number.";
+
+function callGemini(key,lenUrl,widUrl){
+  var parts=[{text:GEM_PROMPT}];
+  if(lenUrl)parts.push({inline_data:{mime_type:"image/jpeg",data:b64(lenUrl)}});
+  if(widUrl)parts.push({inline_data:{mime_type:"image/jpeg",data:b64(widUrl)}});
+  var body={contents:[{parts:parts}],generationConfig:{maxOutputTokens:400}};
+  var url="https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key="+encodeURIComponent(key);
+  return fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})
+    .then(function(r){return r.json();})
+    .then(function(j){
+      if(j.error)throw new Error(j.error.message||"API error");
+      var txt=(((j.candidates||[])[0]||{}).content||{}).parts||[];
+      var raw=txt.map(function(p){return p.text||"";}).join("").trim();
+      raw=raw.replace(/```json/gi,"").replace(/```/g,"").trim();
+      var m=raw.match(/\{[\s\S]*\}/);
+      if(!m)throw new Error("No JSON in response");
+      return JSON.parse(m[0]);
+    });
+}
+
+ge('analyzeAllBtn').addEventListener('click',function(){
+  var key=(ge('gemKey').value||'').trim();
+  if(!key){gemStatus('Paste your Gemini API key first.');return;}
+  // collect ears that have at least one photo
+  var jobs=[];
+  for(var i=0;i<5;i++){if(earPhotos[i].len||earPhotos[i].wid)jobs.push(i);}
+  if(!jobs.length){gemStatus('Load photos for at least one ear first.');return;}
+  ge('analyzeAllBtn').disabled=true;
+  gemStatus('<span class="spinner"></span>Analyzing '+jobs.length+' ear'+(jobs.length>1?'s':'')+'…');
+  var done=0,errs=0;
+  // sequential to respect rate limits
+  function next(qi){
+    if(qi>=jobs.length){
+      ge('analyzeAllBtn').disabled=false;
+      gemStatus('Done — '+done+' ear'+(done>1?'s':'')+' analyzed'+(errs?(', '+errs+' failed'):'')+'. Review each tab and adjust if needed, then Save.');
+      loadEar(jobs[0]);
+      return;
+    }
+    var idx=jobs[qi];
+    gemStatus('<span class="spinner"></span>Ear '+(idx+1)+' ('+(qi+1)+'/'+jobs.length+')…');
+    callGemini(key,earPhotos[idx].len,earPhotos[idx].wid)
+      .then(function(res){
+        var rows=parseInt(res.rows_around);
+        var kpr=parseInt(res.avg_kernels_per_row);
+        if(isNaN(kpr)&&Array.isArray(res.per_row_counts)&&res.per_row_counts.length){
+          var s=res.per_row_counts.reduce(function(a,b){return a+(+b||0);},0);
+          kpr=Math.round(s/res.per_row_counts.length);
+        }
+        if(!isNaN(rows)){if(rows%2!==0)rows++;earPhotos[idx].aiRows=Math.min(24,Math.max(8,rows));}
+        if(!isNaN(kpr))earPhotos[idx].aiKpr=Math.min(60,Math.max(8,kpr));
+        earPhotos[idx].aiDetail=res.per_row_counts||null;
+        // apply immediately if this is the visible ear
+        if(idx===current){
+          if(earPhotos[idx].aiRows)ge('rowsAround').value=earPhotos[idx].aiRows;
+          if(earPhotos[idx].aiKpr){ge('kernelsPerRow').value=earPhotos[idx].aiKpr;ge('kernelsPerRow').removeAttribute('readonly');}
+          recalcEar();
+        }
+        done++;next(qi+1);
+      })
+      .catch(function(err){errs++;earPhotos[idx].aiErr=err.message;next(qi+1);});
+  }
+  next(0);
+});
+
 /* ── SAVE ── */
 ge('saveEarBtn').addEventListener('click',function(){
   var r=parseInt(ge('rowsAround').value)||0,k=parseInt(ge('kernelsPerRow').value)||0;
@@ -593,6 +711,7 @@ document.querySelectorAll('#seg-rowspace .seg-btn').forEach(function(b){b.onclic
 ge('nav-calc').onclick=function(){calcYield();ge('resultsArea').scrollIntoView({behavior:'smooth'});};
 function resetAll(){
   ears=[];for(var i=0;i<5;i++)ears.push(null);current=0;
+  earPhotos=[];for(var i=0;i<5;i++)earPhotos.push({len:null,wid:null});
   ge('rowsAround').value=16;ge('kernelsPerRow').value=36;
   if(cvReady){ge('kernelsPerRow').setAttribute('readonly','');}
   ge('resultsArea').style.display='none';
