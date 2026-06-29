@@ -600,6 +600,13 @@ var GEM_PROMPT=
 '{"rows_around": <even integer>, "per_row_counts": [<int>,...], "avg_kernels_per_row": <integer rounded to nearest kernel>}. '+
 "avg_kernels_per_row must equal the mean of per_row_counts rounded to the nearest whole number.";
 
+function callGeminiModel(model,key,parts,gconfig){
+  var url="https://generativelanguage.googleapis.com/v1beta/models/"+model+":generateContent?key="+encodeURIComponent(key);
+  return fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{parts:parts}],generationConfig:gconfig})})
+    .then(function(r){return r.json().then(function(j){return {status:r.status,j:j};});});
+}
+function wait(ms){return new Promise(function(res){setTimeout(res,ms);});}
+
 function callGemini(key,lenUrl,widUrl){
   var parts=[{text:GEM_PROMPT}];
   if(lenUrl)parts.push({inline_data:{mime_type:"image/jpeg",data:b64(lenUrl)}});
@@ -609,27 +616,36 @@ function callGemini(key,lenUrl,widUrl){
     per_row_counts:{type:"ARRAY",items:{type:"INTEGER"}},
     avg_kernels_per_row:{type:"INTEGER"}
   },required:["rows_around","avg_kernels_per_row"]};
-  var body={contents:[{parts:parts}],generationConfig:{
-    maxOutputTokens:1200,
-    responseMimeType:"application/json",
-    responseSchema:schema
-  }};
-  var url="https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key="+encodeURIComponent(key);
-  return fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})
-    .then(function(r){return r.json().then(function(j){return {status:r.status,j:j};});})
-    .then(function(o){
-      var j=o.j;
-      if(j.error)throw new Error('HTTP '+o.status+': '+(j.error.message||"API error"));
-      var cand=(j.candidates||[])[0]||{};
-      if(cand.finishReason&&cand.finishReason!=='STOP'&&!(cand.content&&cand.content.parts))
-        throw new Error('Model stopped: '+cand.finishReason);
-      var txt=((cand.content||{}).parts)||[];
-      var raw=txt.map(function(p){return p.text||"";}).join("").trim();
-      raw=raw.replace(/```json/gi,"").replace(/```/g,"").trim();
-      var m=raw.match(/\{[\s\S]*\}/);
-      if(!m)throw new Error("No JSON in response");
-      return JSON.parse(m[0]);
-    });
+  var gconfig={maxOutputTokens:1200,responseMimeType:"application/json",responseSchema:schema};
+  // try main Flash with retries on overload, then fall back to Flash-Lite
+  var models=["gemini-flash-latest","gemini-flash-lite-latest"];
+  function tryModel(mi){
+    var model=models[mi];
+    var attempt=0;
+    function go(){
+      attempt++;
+      return callGeminiModel(model,key,parts,gconfig).then(function(o){
+        var j=o.j;
+        if(o.status===503||o.status===429){
+          if(attempt<3){return wait(1500*attempt).then(go);}        // backoff & retry same model
+          if(mi+1<models.length){return tryModel(mi+1);}            // switch to lighter model
+          throw new Error('HTTP '+o.status+': model busy, retries exhausted');
+        }
+        if(j.error)throw new Error('HTTP '+o.status+': '+(j.error.message||"API error"));
+        var cand=(j.candidates||[])[0]||{};
+        if(cand.finishReason&&cand.finishReason!=='STOP'&&!(cand.content&&cand.content.parts))
+          throw new Error('Model stopped: '+cand.finishReason);
+        var txt=((cand.content||{}).parts)||[];
+        var raw=txt.map(function(p){return p.text||"";}).join("").trim();
+        raw=raw.replace(/```json/gi,"").replace(/```/g,"").trim();
+        var m=raw.match(/\{[\s\S]*\}/);
+        if(!m)throw new Error("No JSON in response");
+        return JSON.parse(m[0]);
+      });
+    }
+    return go();
+  }
+  return tryModel(0);
 }
 
 ge('analyzeAllBtn').addEventListener('click',function(){
