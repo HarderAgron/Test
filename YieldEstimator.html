@@ -592,16 +592,15 @@ function b64(dataUrl){return dataUrl.split(',')[1];}
 
 var GEM_PROMPT=
 "You are an agronomist counting corn kernels for a yield estimate. "+
-"You are given two photos of ONE corn ear: a SIDE view (length) and an END view (rows around). "+
-"From the SIDE view: identify each fully-filled kernel row that is clearly visible on the face. "+
+"You are given two photos of ONE corn ear: a SIDE view (length) and an END view (the cut end, rows around). "+
+"TASK 1 (kernels per row, from the SIDE view): identify each fully-filled kernel row clearly visible on the face. "+
 "Count the filled kernels in EACH visible row, EXCLUDING the small/partial kernels at the nubbin tip and the crowded irregular kernels at the butt end. "+
-"From the END view: count the TOTAL number of kernel rows going all the way around the full 360-degree circumference of the cob. "+
-"CRITICAL: this is a 3D cob photographed end-on, so the kernels on the FAR side of the ring curve away from the camera and appear small, dark, foreshortened, and partially hidden. You MUST count those far-side and edge rows too, not just the bright ones facing the camera. "+
-"Most dent corn has between 14 and 22 rows, and the count is always an EVEN number. "+
-"A reliable method: carefully count the rows across the visible near half of the ring, then DOUBLE that number, since a corn ear is radially symmetric and the hidden far half has the same number of rows as the near half. "+
-"If your initial count seems low (e.g. 12 or 14), re-examine the dim edges of the ring for rows you may have missed, then round UP to the nearest even number. "+
+"TASK 2 (rows around, estimated TWO independent ways): "+
+"(a) rows_from_side: On the SIDE view, count how many distinct vertical kernel rows are visible across the face of the ear, from the left silhouette edge to the right silhouette edge. Because you are seeing the front half of a round cob, this is about HALF of the total rows. DOUBLE that number to get the full rows around. "+
+"(b) rows_from_end: On the END view, count the rows all the way around the 360-degree ring. The far side curves away and looks dark/small/foreshortened but those rows still count; a reliable way is to count the near half of the ring and double it. "+
+"Most dent corn has 14 to 22 rows, and rows around is ALWAYS an EVEN number. Round each estimate to the nearest even number. "+
 "Return ONLY a JSON object, no markdown, no prose, exactly: "+
-'{"rows_around": <even integer>, "per_row_counts": [<int>,...], "avg_kernels_per_row": <integer rounded to nearest kernel>}. '+
+'{"rows_from_side": <even int>, "rows_from_end": <even int>, "per_row_counts": [<int>,...], "avg_kernels_per_row": <int>}. '+
 "avg_kernels_per_row must equal the mean of per_row_counts rounded to the nearest whole number.";
 
 function callGeminiModel(model,key,parts,gconfig){
@@ -616,10 +615,11 @@ function callGemini(key,lenUrl,widUrl){
   if(lenUrl)parts.push({inline_data:{mime_type:"image/jpeg",data:b64(lenUrl)}});
   if(widUrl)parts.push({inline_data:{mime_type:"image/jpeg",data:b64(widUrl)}});
   var schema={type:"OBJECT",properties:{
-    rows_around:{type:"INTEGER"},
+    rows_from_side:{type:"INTEGER"},
+    rows_from_end:{type:"INTEGER"},
     per_row_counts:{type:"ARRAY",items:{type:"INTEGER"}},
     avg_kernels_per_row:{type:"INTEGER"}
-  },required:["rows_around","avg_kernels_per_row"]};
+  },required:["rows_from_side","avg_kernels_per_row"]};
   var gconfig={
     maxOutputTokens:2048,
     responseMimeType:"application/json",
@@ -677,6 +677,13 @@ ge('analyzeAllBtn').addEventListener('click',function(){
       ge('analyzeAllBtn').disabled=false;
       var msg='Done — '+done+' analyzed'+(errs?(', '+errs+' failed'):'')+'.';
       if(errs&&lastErr)msg+='<br><span style="color:#c0392b">Error: '+lastErr+'</span>';
+      // show each ear's two row estimates so you can judge agreement
+      jobs.forEach(function(idx){
+        var p=earPhotos[idx];
+        if(p.aiRowsSide!=null||p.aiRowsEnd!=null){
+          msg+='<br>Ear '+(idx+1)+': rows side='+(p.aiRowsSide!=null?p.aiRowsSide:'–')+' end='+(p.aiRowsEnd!=null?p.aiRowsEnd:'–')+' → used '+(p.aiRows||'?');
+        }
+      });
       gemStatus(msg);
       // write AI results into the live ear records so they show on every tab
       jobs.forEach(function(idx){
@@ -697,13 +704,23 @@ ge('analyzeAllBtn').addEventListener('click',function(){
     gemStatus('<span class="spinner"></span>Ear '+(idx+1)+' ('+(qi+1)+'/'+jobs.length+')…');
     callGemini(key,earPhotos[idx].len,earPhotos[idx].wid)
       .then(function(res){
-        var rows=parseInt(res.rows_around);
+        var rSide=parseInt(res.rows_from_side);
+        var rEnd=parseInt(res.rows_from_end);
+        var rows;
+        if(!isNaN(rSide)&&!isNaN(rEnd)){
+          // side is primary; if they disagree, average the two and round to even
+          rows = (rSide===rEnd) ? rSide : Math.round((rSide+rEnd)/2);
+        }else if(!isNaN(rSide)){rows=rSide;}
+        else if(!isNaN(rEnd)){rows=rEnd;}
+        if(rows!==undefined&&rows%2!==0)rows++;   // force even
         var kpr=parseInt(res.avg_kernels_per_row);
         if(isNaN(kpr)&&Array.isArray(res.per_row_counts)&&res.per_row_counts.length){
           var s=res.per_row_counts.reduce(function(a,b){return a+(+b||0);},0);
           kpr=Math.round(s/res.per_row_counts.length);
         }
-        if(!isNaN(rows)){if(rows%2!==0)rows++;earPhotos[idx].aiRows=Math.min(24,Math.max(8,rows));}
+        if(rows!==undefined&&!isNaN(rows))earPhotos[idx].aiRows=Math.min(24,Math.max(8,rows));
+        earPhotos[idx].aiRowsSide=isNaN(rSide)?null:rSide;
+        earPhotos[idx].aiRowsEnd=isNaN(rEnd)?null:rEnd;
         if(!isNaN(kpr))earPhotos[idx].aiKpr=Math.min(60,Math.max(8,kpr));
         earPhotos[idx].aiDetail=res.per_row_counts||null;
         // write into the live record immediately so it's there on any tab
