@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>Yield Estimator - Burrus Field Tools</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Playfair+Display:wght@400;700;900&family=Source+Serif+4:wght@300;400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
 :root{--gold:#b8972a;--gold-d:#8a6f1e;--gold-l:#d4b84a;--dark:#1c1a16;--dbg:#252018;--red:#c0392b;--green:#2e7d32;--amber:#e67e22;--tan:#f2ece0;--panel:#faf7f0;--border:#d0c49a;--muted:#7a6a4a;--inp:#fff;}
@@ -102,6 +104,36 @@ html,body{height:100%;overflow:hidden;background:#ddd6c4;font-family:"Source Ser
 
 <div id="main">
 
+  <!-- FIELD INFO (top) -->
+  <div class="card">
+    <div class="ctitle"><span>Field</span><span class="step">Location &amp; date</span></div>
+    <div class="row2">
+      <div class="fg"><label>Date</label><input type="date" id="sampleDate"></div>
+      <div class="fg"><label>County</label><input type="text" id="county" placeholder="Auto from GPS"></div>
+    </div>
+    <button class="savebtn" id="gpsBtn" style="background:var(--dbg);color:var(--gold-l);">📍 Grab GPS &amp; County</button>
+    <div class="hint" id="gpsHint" style="margin-top:6px;">Tap to capture field coordinates and look up the county.</div>
+    <div id="satWrap" style="display:none;margin-top:8px;">
+      <div id="satMap" style="width:100%;height:240px;border-radius:8px;border:1.5px solid var(--border);"></div>
+      <div class="hint" id="satHint" style="margin-top:4px;">Pinch to zoom, drag to pan the field.</div>
+    </div>
+  </div>
+
+  <!-- HYBRID (moved to top) -->
+  <div class="card">
+    <div class="ctitle"><span>Hybrid</span><span class="step">Optional</span></div>
+    <div class="fg">
+      <label>Hybrid</label>
+      <select id="hybridSelect"><option value="generic">Generic (80,000 kernels/bu)</option></select>
+      <div class="hint">Hybrid-specific kernel weight data loads here once added.</div>
+    </div>
+    <div class="fg">
+      <label>Kernels Per Bushel</label>
+      <input type="number" id="kernelsPerBu" inputmode="numeric" value="80000">
+      <div class="hint">Lower = bolder kernels = more bu. 75k&ndash;90k typical.</div>
+    </div>
+  </div>
+
   <!-- STAND COUNT -->
   <div class="card">
     <div class="ctitle"><span>Stand Count</span><span class="step">Step 1</span></div>
@@ -178,7 +210,6 @@ html,body{height:100%;overflow:hidden;background:#ddd6c4;font-family:"Source Ser
       <div class="ko-val" id="earKernels">576</div>
       <div class="ko-sub" id="earKernelsSub">16 rows &times; 36 per row</div>
     </div>
-    <button class="savebtn" id="saveEarBtn" style="margin-top:12px;">Save Ear &amp; Next &rarr;</button>
   </div>
 
   <!-- GEMINI AI ANALYSIS -->
@@ -194,21 +225,6 @@ html,body{height:100%;overflow:hidden;background:#ddd6c4;font-family:"Source Ser
     </div>
     <button class="savebtn" id="analyzeAllBtn">Analyze All Loaded Ears</button>
     <div class="cv-status" id="gemStatus" style="margin-top:8px;"></div>
-  </div>
-
-  <!-- HYBRID -->
-  <div class="card">
-    <div class="ctitle"><span>Hybrid</span><span class="step">Optional</span></div>
-    <div class="fg">
-      <label>Hybrid</label>
-      <select id="hybridSelect"><option value="generic">Generic (80,000 kernels/bu)</option></select>
-      <div class="hint">Hybrid-specific kernel weight data loads here once added.</div>
-    </div>
-    <div class="fg">
-      <label>Kernels Per Bushel</label>
-      <input type="number" id="kernelsPerBu" inputmode="numeric" value="80000">
-      <div class="hint">Lower = bolder kernels = more bu. 75k&ndash;90k typical.</div>
-    </div>
   </div>
 
   <!-- RESULTS -->
@@ -238,21 +254,6 @@ html,body{height:100%;overflow:hidden;background:#ddd6c4;font-family:"Source Ser
       </div>
       <button class="savebtn" id="dlReportBtn">Download Yield Report (JPG)</button>
     </div>
-  </div>
-
-  <!-- TRAINING DATA CAPTURE -->
-  <div class="card">
-    <div class="ctitle"><span>Training Data</span><span class="step">Build the model</span></div>
-    <div class="info-row">
-      <div class="info-text">Each saved ear keeps its two photos labeled with your <b>rows</b> and <b>kernels/row</b> counts. Export them as you scout to build a Burrus dataset for a future auto-count model. Nothing is uploaded — the file saves to your phone.</div>
-    </div>
-    <div class="fg">
-      <label>Hybrid / Field Tag (optional)</label>
-      <input type="text" id="trainTag" placeholder="e.g. 7T27 / North 40" autocapitalize="characters">
-      <div class="hint" id="captureCount">0 ears captured this session.</div>
-    </div>
-    <button class="savebtn" id="exportTrainBtn">Export Training Set (.zip-free bundle)</button>
-    <div class="hint" style="margin-top:8px;">Exports an HTML bundle with every ear's photos + labels, openable on a computer and ready to label-check. Keep these in a Burrus folder; once you have ~300 ears we train the in-browser model.</div>
   </div>
 
   <button class="rstbtn" id="resetBtn">Reset All Samples</button>
@@ -398,6 +399,11 @@ function recalcEar(){
   if(r%2!==0){r++;ge('rowsAround').value=r;}
   ge('earKernels').textContent=(r*k).toLocaleString();
   ge('earKernelsSub').textContent=r+' rows × '+k+' per row';
+  // auto-save this ear (no separate save button)
+  if(r>=8&&k>=8){
+    ears[current]={rows:r,kpr:k,kernels:r*k,lenImg:lenFullSrc,widImg:widFullSrc};
+    buildTabs();
+  }
 }
 
 /* ── PHOTO ZONES ── */
@@ -699,7 +705,7 @@ ge('analyzeAllBtn').addEventListener('click',function(){
           ears[idx]={rows:rows,kpr:kpr,kernels:rows*kpr,lenImg:p.len,widImg:p.wid};
         }
       });
-      buildTabs();updateCaptureCount();
+      buildTabs();
       // refresh the visible ear's inputs from its record
       var vis=current;current=-1;loadEar(vis);
       return;
@@ -743,18 +749,6 @@ ge('analyzeAllBtn').addEventListener('click',function(){
   next(0);
 });
 
-/* ── SAVE ── */
-ge('saveEarBtn').addEventListener('click',function(){
-  var r=parseInt(ge('rowsAround').value)||0,k=parseInt(ge('kernelsPerRow').value)||0;
-  if(r<8||k<10){toast('Set rows and kernels/row first');return;}
-  ears[current]={rows:r,kpr:k,kernels:r*k,lenImg:lenFullSrc,widImg:widFullSrc};
-  toast('Ear '+(current+1)+' saved');
-  buildTabs();updateCaptureCount();
-  var next=-1;for(var i=0;i<5;i++){if(!ears[i]){next=i;break;}}
-  if(next>=0)loadEar(next);
-  else{calcYield();ge('resultsArea').scrollIntoView({behavior:'smooth'});}
-});
-
 /* ── YIELD ── */
 function calcYield(){
   var saved=ears.filter(function(e){return e;});
@@ -795,55 +789,52 @@ function resetAll(){
   ge('rowsAround').value=16;ge('kernelsPerRow').value=36;
   ge('resultsArea').style.display='none';
   lenFullSrc=null;widFullSrc=null;
-  resetZone('len');resetZone('wid');recalcEar();buildTabs();updateCaptureCount();
+  resetZone('len');resetZone('wid');recalcEar();buildTabs();
   toast('All samples cleared');
 }
 ge('resetBtn').onclick=resetAll;ge('nav-reset').onclick=resetAll;
 
-/* ── TRAINING CAPTURE ── */
-function capturedEars(){return ears.filter(function(e){return e&&(e.lenImg||e.widImg);});}
-function updateCaptureCount(){
-  var c=capturedEars().length;
-  ge('captureCount').textContent=c+(c===1?' ear':' ears')+' captured this session.';
-}
-ge('exportTrainBtn').addEventListener('click',function(){
-  var cap=capturedEars();
-  if(!cap.length){toast('Save an ear with photos first');return;}
-  var tag=(ge('trainTag').value||'').trim();
-  var stamp=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
-  // build a manifest + a self-contained viewer/exporter HTML
-  var records=cap.map(function(e,i){
-    return {idx:i+1,tag:tag,rows:e.rows,kpr:e.kpr,kernels:e.kernels,
-            endPhoto:e.widImg||null,sidePhoto:e.lenImg||null};
-  });
-  var manifest={created:stamp,tag:tag,count:records.length,records:records};
-  var json=JSON.stringify(manifest);
-  var html=''
-    +'<!DOCTYPE html><html><head><meta charset="utf-8"><title>Burrus Training Capture '+stamp+'</title>'
-    +'<style>body{font-family:system-ui,sans-serif;background:#1c1a16;color:#f2ece0;margin:0;padding:18px}'
-    +'h1{font-size:16px;color:#d4b84a}.rec{display:flex;gap:14px;background:#252018;border:1px solid #b8972a;border-radius:8px;padding:12px;margin:12px 0;align-items:center;flex-wrap:wrap}'
-    +'.rec img{height:160px;border-radius:6px;background:#000}.lbl{font-family:monospace;font-size:13px;line-height:1.7}'
-    +'.lbl b{color:#d4b84a}.tag{color:#9bd49e}button{background:#b8972a;color:#1c1a16;border:none;border-radius:6px;padding:10px 16px;font-weight:700;cursor:pointer;font-family:monospace}</style></head><body>'
-    +'<h1>BURRUS — Ear-End Training Capture</h1>'
-    +'<p style="font-family:monospace;font-size:12px">Created '+stamp+(tag?(' &middot; '+tag):'')+' &middot; '+records.length+' ears. '
-    +'Each record pairs the end photo (for rows-around) and side photo (for kernels/row) with your hand counts. '
-    +'Accumulate these; once ~300 ears are gathered they become the training set for the in-browser model.</p>'
-    +'<button onclick="dl()">Download manifest.json</button><div id="list"></div>'
-    +'<script>var M='+json+';'
-    +'var L=document.getElementById("list");M.records.forEach(function(r){'
-    +'var d=document.createElement("div");d.className="rec";'
-    +'var imgs="";if(r.endPhoto)imgs+=\'<img src="\'+r.endPhoto+\'">\';if(r.sidePhoto)imgs+=\'<img src="\'+r.sidePhoto+\'">\';'
-    +'d.innerHTML=imgs+\'<div class="lbl">Ear #\'+r.idx+(r.tag?\' <span class=tag>[\'+r.tag+\']</span>\':\'\')+\'<br><b>Rows around:</b> \'+r.rows+\'<br><b>Kernels/row:</b> \'+r.kpr+\'<br><b>Total:</b> \'+r.kernels+\' kernels</div>\';'
-    +'L.appendChild(d);});'
-    +'function dl(){var b=new Blob([JSON.stringify(M,null,2)],{type:"application/json"});var a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="burrus-training-'+stamp+'.json";a.click();}'
-    +'<\/script></body></html>';
-  var blob=new Blob([html],{type:'text/html'});
-  var a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download='burrus-training-'+stamp+'.html';
-  document.body.appendChild(a);a.click();document.body.removeChild(a);
-  toast('Exported '+records.length+' labeled ears');
+/* ── GPS + COUNTY + SATELLITE (Esri, keyless) ── */
+var fieldLat=null,fieldLon=null,satMap=null,satMarker=null;
+ge('gpsBtn').addEventListener('click',function(){
+  if(!navigator.geolocation){ge('gpsHint').textContent='Geolocation not available on this device.';return;}
+  ge('gpsHint').textContent='Getting location…';
+  navigator.geolocation.getCurrentPosition(function(pos){
+    fieldLat=pos.coords.latitude;fieldLon=pos.coords.longitude;
+    ge('gpsHint').textContent='📍 '+fieldLat.toFixed(5)+', '+fieldLon.toFixed(5);
+    lookupCounty(fieldLat,fieldLon);
+    showSatellite(fieldLat,fieldLon);
+  },function(err){
+    ge('gpsHint').textContent='Location error: '+err.message;
+  },{enableHighAccuracy:true,timeout:10000,maximumAge:0});
 });
+// reverse geocode county via free FCC/Census (keyless)
+function lookupCounty(lat,lon){
+  var url='https://geo.fcc.gov/api/census/area?lat='+lat+'&lon='+lon+'&format=json';
+  fetch(url).then(function(r){return r.json();}).then(function(j){
+    var c=(j.results&&j.results[0]&&j.results[0].county_name)||'';
+    var st=(j.results&&j.results[0]&&j.results[0].state_code)||'';
+    if(c){ge('county').value=c+(st?(' '+st):'');}
+    else{ge('county').placeholder='County not found — type it';}
+  }).catch(function(){ge('county').placeholder='County lookup failed — type it';});
+}
+// Esri World Imagery satellite tiles via Leaflet (no key)
+function showSatellite(lat,lon){
+  ge('satWrap').style.display='block';
+  if(typeof L==='undefined'){ge('satHint').textContent='Map library not loaded (needs connection).';return;}
+  if(!satMap){
+    satMap=L.map('satMap',{zoomControl:true,attributionControl:true}).setView([lat,lon],16);
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{
+      maxZoom:19,attribution:'Imagery © Esri'
+    }).addTo(satMap);
+    satMarker=L.marker([lat,lon]).addTo(satMap);
+  }else{
+    satMap.setView([lat,lon],16);
+    satMarker.setLatLng([lat,lon]);
+  }
+  // Leaflet needs a size recalc when its container was just shown
+  setTimeout(function(){satMap.invalidateSize();},200);
+}
 
 /* ── JPG FIELD REPORT ── */
 function drawReport(){
@@ -858,9 +849,10 @@ function drawReport(){
   x.strokeStyle='#b8972a';x.lineWidth=3;x.beginPath();x.moveTo(0,150);x.lineTo(W,150);x.stroke();
   // meta
   var g=(ge('grower').value||'—'),f=(ge('field').value||'—');
+  var co=(ge('county').value||'—'),dt=(ge('sampleDate').value||new Date().toLocaleDateString());
   x.fillStyle='#7a6a4a';x.font='500 22px monospace';
   x.fillText('Grower: '+g,48,200);x.fillText('Field: '+f,48,234);
-  x.fillText(new Date().toLocaleDateString(),48,268);
+  x.fillText('County: '+co+'    '+dt,48,268);
   // big yield
   x.fillStyle='#252018';x.fillRect(48,300,W-96,220);
   x.strokeStyle='#b8972a';x.lineWidth=2;x.strokeRect(48,300,W-96,220);
@@ -915,7 +907,8 @@ ge('dlReportBtn').addEventListener('click',function(){
 
 /* init */
 resetZone('len');resetZone('wid');
-buildTabs();autoEPA();recalcEar();updateCaptureCount();
+try{ge('sampleDate').value=new Date().toISOString().slice(0,10);}catch(e){}
+buildTabs();autoEPA();recalcEar();
 </script>
 </body>
 </html>
