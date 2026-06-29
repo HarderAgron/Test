@@ -604,7 +604,16 @@ function callGemini(key,lenUrl,widUrl){
   var parts=[{text:GEM_PROMPT}];
   if(lenUrl)parts.push({inline_data:{mime_type:"image/jpeg",data:b64(lenUrl)}});
   if(widUrl)parts.push({inline_data:{mime_type:"image/jpeg",data:b64(widUrl)}});
-  var body={contents:[{parts:parts}],generationConfig:{maxOutputTokens:400}};
+  var schema={type:"OBJECT",properties:{
+    rows_around:{type:"INTEGER"},
+    per_row_counts:{type:"ARRAY",items:{type:"INTEGER"}},
+    avg_kernels_per_row:{type:"INTEGER"}
+  },required:["rows_around","avg_kernels_per_row"]};
+  var body={contents:[{parts:parts}],generationConfig:{
+    maxOutputTokens:1200,
+    responseMimeType:"application/json",
+    responseSchema:schema
+  }};
   var url="https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key="+encodeURIComponent(key);
   return fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})
     .then(function(r){return r.json().then(function(j){return {status:r.status,j:j};});})
@@ -840,6 +849,7 @@ ge('dlReportBtn').addEventListener('click',function(){
 });
 
 /* init */
+resetZone('len');resetZone('wid');
 buildTabs();autoEPA();recalcEar();updateCaptureCount();
 </script>
 </body>
