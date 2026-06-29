@@ -616,9 +616,14 @@ function callGemini(key,lenUrl,widUrl){
     per_row_counts:{type:"ARRAY",items:{type:"INTEGER"}},
     avg_kernels_per_row:{type:"INTEGER"}
   },required:["rows_around","avg_kernels_per_row"]};
-  var gconfig={maxOutputTokens:1200,responseMimeType:"application/json",responseSchema:schema};
-  // try main Flash with retries on overload, then fall back to Flash-Lite
-  var models=["gemini-flash-latest","gemini-flash-lite-latest"];
+  var gconfig={
+    maxOutputTokens:2048,
+    responseMimeType:"application/json",
+    responseSchema:schema,
+    thinkingConfig:{thinkingBudget:0}   // 2.5-flash supports clean thinking-off; tokens go to the answer
+  };
+  // 2.5-flash cleanly supports thinkingBudget:0; lite as overload fallback
+  var models=["gemini-2.5-flash","gemini-2.5-flash-lite"];
   function tryModel(mi){
     var model=models[mi];
     var attempt=0;
@@ -633,13 +638,17 @@ function callGemini(key,lenUrl,widUrl){
         }
         if(j.error)throw new Error('HTTP '+o.status+': '+(j.error.message||"API error"));
         var cand=(j.candidates||[])[0]||{};
-        if(cand.finishReason&&cand.finishReason!=='STOP'&&!(cand.content&&cand.content.parts))
-          throw new Error('Model stopped: '+cand.finishReason);
+        var fr=cand.finishReason||'?';
         var txt=((cand.content||{}).parts)||[];
         var raw=txt.map(function(p){return p.text||"";}).join("").trim();
+        // if the model returned no text, try the next model before failing
+        if(!raw){
+          if(fr==='MAX_TOKENS'&&mi+1<models.length){return tryModel(mi+1);}
+          throw new Error('Empty response (finishReason: '+fr+')');
+        }
         raw=raw.replace(/```json/gi,"").replace(/```/g,"").trim();
         var m=raw.match(/\{[\s\S]*\}/);
-        if(!m)throw new Error("No JSON in response");
+        if(!m)throw new Error('No JSON (finishReason: '+fr+', got: '+raw.slice(0,40)+')');
         return JSON.parse(m[0]);
       });
     }
