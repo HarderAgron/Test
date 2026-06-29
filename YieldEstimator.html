@@ -708,9 +708,9 @@ ge('analyzeAllBtn').addEventListener('click',function(){
         var rSide=parseInt(res.rows_from_side);
         var rEnd=parseInt(res.rows_from_end);
         var rows;
-        // side (kernel-width ruler method) is primary; use end only as fallback
-        if(!isNaN(rSide))rows=rSide;
-        else if(!isNaN(rEnd))rows=rEnd;
+        // end view matched ground truth best; use it as primary, side as fallback
+        if(!isNaN(rEnd))rows=rEnd;
+        else if(!isNaN(rSide))rows=rSide;
         if(rows!==undefined&&rows%2!==0)rows++;   // force even
         var kpr=parseInt(res.avg_kernels_per_row);
         if(isNaN(kpr)&&Array.isArray(res.per_row_counts)&&res.per_row_counts.length){
