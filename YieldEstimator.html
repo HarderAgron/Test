@@ -674,7 +674,19 @@ ge('analyzeAllBtn').addEventListener('click',function(){
       var msg='Done — '+done+' analyzed'+(errs?(', '+errs+' failed'):'')+'.';
       if(errs&&lastErr)msg+='<br><span style="color:#c0392b">Error: '+lastErr+'</span>';
       gemStatus(msg);
-      loadEar(jobs[0]);
+      // write AI results into the live ear records so they show on every tab
+      jobs.forEach(function(idx){
+        var p=earPhotos[idx];
+        if(p.aiRows||p.aiKpr){
+          var prev=ears[idx]||{};
+          var rows=p.aiRows||prev.rows||16;
+          var kpr=p.aiKpr||prev.kpr||36;
+          ears[idx]={rows:rows,kpr:kpr,kernels:rows*kpr,lenImg:p.len,widImg:p.wid};
+        }
+      });
+      buildTabs();updateCaptureCount();
+      // refresh the visible ear's inputs from its record
+      var vis=current;current=-1;loadEar(vis);
       return;
     }
     var idx=jobs[qi];
@@ -690,11 +702,16 @@ ge('analyzeAllBtn').addEventListener('click',function(){
         if(!isNaN(rows)){if(rows%2!==0)rows++;earPhotos[idx].aiRows=Math.min(24,Math.max(8,rows));}
         if(!isNaN(kpr))earPhotos[idx].aiKpr=Math.min(60,Math.max(8,kpr));
         earPhotos[idx].aiDetail=res.per_row_counts||null;
+        // write into the live record immediately so it's there on any tab
+        var rr=earPhotos[idx].aiRows||(ears[idx]&&ears[idx].rows)||16;
+        var kk=earPhotos[idx].aiKpr||(ears[idx]&&ears[idx].kpr)||36;
+        ears[idx]={rows:rr,kpr:kk,kernels:rr*kk,lenImg:earPhotos[idx].len,widImg:earPhotos[idx].wid};
         if(idx===current){
-          if(earPhotos[idx].aiRows)ge('rowsAround').value=earPhotos[idx].aiRows;
-          if(earPhotos[idx].aiKpr){ge('kernelsPerRow').value=earPhotos[idx].aiKpr;ge('kernelsPerRow').removeAttribute('readonly');}
+          ge('rowsAround').value=rr;
+          ge('kernelsPerRow').value=kk;ge('kernelsPerRow').removeAttribute('readonly');
           recalcEar();
         }
+        buildTabs();
         done++;next(qi+1);
       })
       .catch(function(err){errs++;lastErr=err.message;earPhotos[idx].aiErr=err.message;next(qi+1);});
