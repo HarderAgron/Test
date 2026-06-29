@@ -708,8 +708,9 @@ ge('analyzeAllBtn').addEventListener('click',function(){
         var rSide=parseInt(res.rows_from_side);
         var rEnd=parseInt(res.rows_from_end);
         var rows;
-        // end view matched ground truth best; use it as primary, side as fallback
-        if(!isNaN(rEnd))rows=rEnd;
+        // each view tends to UNDERcount, rarely overcounts — so take the higher of the two
+        if(!isNaN(rSide)&&!isNaN(rEnd))rows=Math.max(rSide,rEnd);
+        else if(!isNaN(rEnd))rows=rEnd;
         else if(!isNaN(rSide))rows=rSide;
         if(rows!==undefined&&rows%2!==0)rows++;   // force even
         var kpr=parseInt(res.avg_kernels_per_row);
