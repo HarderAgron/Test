@@ -607,10 +607,14 @@ function callGemini(key,lenUrl,widUrl){
   var body={contents:[{parts:parts}],generationConfig:{maxOutputTokens:400}};
   var url="https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key="+encodeURIComponent(key);
   return fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})
-    .then(function(r){return r.json();})
-    .then(function(j){
-      if(j.error)throw new Error(j.error.message||"API error");
-      var txt=(((j.candidates||[])[0]||{}).content||{}).parts||[];
+    .then(function(r){return r.json().then(function(j){return {status:r.status,j:j};});})
+    .then(function(o){
+      var j=o.j;
+      if(j.error)throw new Error('HTTP '+o.status+': '+(j.error.message||"API error"));
+      var cand=(j.candidates||[])[0]||{};
+      if(cand.finishReason&&cand.finishReason!=='STOP'&&!(cand.content&&cand.content.parts))
+        throw new Error('Model stopped: '+cand.finishReason);
+      var txt=((cand.content||{}).parts)||[];
       var raw=txt.map(function(p){return p.text||"";}).join("").trim();
       raw=raw.replace(/```json/gi,"").replace(/```/g,"").trim();
       var m=raw.match(/\{[\s\S]*\}/);
@@ -628,12 +632,14 @@ ge('analyzeAllBtn').addEventListener('click',function(){
   if(!jobs.length){gemStatus('Load photos for at least one ear first.');return;}
   ge('analyzeAllBtn').disabled=true;
   gemStatus('<span class="spinner"></span>Analyzing '+jobs.length+' ear'+(jobs.length>1?'s':'')+'…');
-  var done=0,errs=0;
+  var done=0,errs=0,lastErr='';
   // sequential to respect rate limits
   function next(qi){
     if(qi>=jobs.length){
       ge('analyzeAllBtn').disabled=false;
-      gemStatus('Done — '+done+' ear'+(done>1?'s':'')+' analyzed'+(errs?(', '+errs+' failed'):'')+'. Review each tab and adjust if needed, then Save.');
+      var msg='Done — '+done+' analyzed'+(errs?(', '+errs+' failed'):'')+'.';
+      if(errs&&lastErr)msg+='<br><span style="color:#c0392b">Error: '+lastErr+'</span>';
+      gemStatus(msg);
       loadEar(jobs[0]);
       return;
     }
@@ -650,7 +656,6 @@ ge('analyzeAllBtn').addEventListener('click',function(){
         if(!isNaN(rows)){if(rows%2!==0)rows++;earPhotos[idx].aiRows=Math.min(24,Math.max(8,rows));}
         if(!isNaN(kpr))earPhotos[idx].aiKpr=Math.min(60,Math.max(8,kpr));
         earPhotos[idx].aiDetail=res.per_row_counts||null;
-        // apply immediately if this is the visible ear
         if(idx===current){
           if(earPhotos[idx].aiRows)ge('rowsAround').value=earPhotos[idx].aiRows;
           if(earPhotos[idx].aiKpr){ge('kernelsPerRow').value=earPhotos[idx].aiKpr;ge('kernelsPerRow').removeAttribute('readonly');}
@@ -658,7 +663,7 @@ ge('analyzeAllBtn').addEventListener('click',function(){
         }
         done++;next(qi+1);
       })
-      .catch(function(err){errs++;earPhotos[idx].aiErr=err.message;next(qi+1);});
+      .catch(function(err){errs++;lastErr=err.message;earPhotos[idx].aiErr=err.message;next(qi+1);});
   }
   next(0);
 });
