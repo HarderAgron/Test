@@ -139,20 +139,40 @@ function detectKernels(cv, srcMat, excludeRects, params) {
   let grayF = new cv.Mat();
   gray.convertTo(grayF, cv.CV_32F);
 
-  // ---- multi-scale DoG blob candidates ----
+  // mask as float (1 inside kernel region, 0 outside) — used to keep the background
+  // from bleeding into the blur near the ear's edge (normalized/masked convolution)
+  let maskF = new cv.Mat();
+  finalMask.convertTo(maskF, cv.CV_32F, 1.0 / 255.0);
+  let imgMasked = new cv.Mat();
+  cv.multiply(grayF, maskF, imgMasked);
+
+  // ---- multi-scale DoG blob candidates (masked-blur, so the dark background never
+  //      contaminates values near the ear boundary) ----
   const sigmas = [];
   const ns = Math.max(2, params.numScales);
   for (let i = 0; i < ns; i++) {
     sigmas.push(params.sigmaMin + (params.sigmaMax - params.sigmaMin) * i / (ns - 1));
   }
 
+  function maskedBlur(sigma) {
+    const ksize = Math.max(3, Math.round(sigma * 3) | 1);
+    let bImg = new cv.Mat(), bMask = new cv.Mat();
+    cv.GaussianBlur(imgMasked, bImg, new cv.Size(ksize, ksize), sigma, sigma, cv.BORDER_REFLECT);
+    cv.GaussianBlur(maskF, bMask, new cv.Size(ksize, ksize), sigma, sigma, cv.BORDER_REFLECT);
+    // add a small epsilon to the mask blur to avoid divide-by-zero outside the mask
+    let bMaskEps = new cv.Mat();
+    cv.add(bMask, new cv.Mat(bMask.rows, bMask.cols, bMask.type(), [1e-3, 0, 0, 0]), bMaskEps);
+    let normalized = new cv.Mat();
+    cv.divide(bImg, bMaskEps, normalized);
+    bImg.delete(); bMask.delete(); bMaskEps.delete();
+    return normalized;
+  }
+
   let prevBlur = null;
   const responseStack = []; // { sigma, mat }
   for (let i = 0; i < sigmas.length; i++) {
     const sigma = sigmas[i];
-    let blurred = new cv.Mat();
-    const ksize = Math.max(3, Math.round(sigma * 3) | 1);
-    cv.GaussianBlur(grayF, blurred, new cv.Size(ksize, ksize), sigma, sigma, cv.BORDER_REFLECT);
+    const blurred = maskedBlur(sigma);
     if (prevBlur) {
       let dog = new cv.Mat();
       cv.subtract(prevBlur.mat, blurred, dog); // brighter-at-finer-scale => positive at blob center
@@ -162,6 +182,7 @@ function detectKernels(cv, srcMat, excludeRects, params) {
     prevBlur = { sigma, mat: blurred };
   }
   if (prevBlur) prevBlur.mat.delete();
+  maskF.delete(); imgMasked.delete();
 
   // collect local maxima per scale (3x3 neighborhood), above threshold, inside mask
   const candidates = [];
