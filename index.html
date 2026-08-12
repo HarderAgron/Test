@@ -52,10 +52,10 @@ async function storageSet(key, val) {
 const DEFAULT_PARAMS = {
   hLow: 12, hHigh: 35, sLow: 70, sHigh: 255, vLow: 90, vHigh: 255,
   sigmaMin: 5, sigmaMax: 13, numScales: 9,
-  dogThreshold: 6,       // minimum DoG response to count as a candidate blob
+  dogThreshold: 9,       // minimum DoG response to count as a candidate blob
   mergeMargin: 12,       // groove-dip tolerance (gray levels)
   edgeThresh: 16,        // px from mask boundary treated as "edge zone"
-  minCandidateDist: 6,   // px, minimum spacing enforced during candidate extraction
+  minCandidateDist: 8,   // px, minimum spacing enforced during candidate extraction
 };
 
 function uid() { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
@@ -655,9 +655,12 @@ function App() {
                 <div style={{ position: 'absolute', left: Math.min(drawingRect.x0, drawingRect.x1), top: Math.min(drawingRect.y0, drawingRect.y1),
                   width: Math.abs(drawingRect.x1 - drawingRect.x0), height: Math.abs(drawingRect.y1 - drawingRect.y0), border: '2px dashed #8888ff', background: 'rgba(80,80,255,0.2)' }} />
               )}
-              {ear.points.map((p) => (
-                <div key={p.id} style={{ position: 'absolute', left: p.x - 5, top: p.y - 5, width: 10, height: 10, borderRadius: '50%', background: '#e0332f', border: '1.4px solid #fff', pointerEvents: 'none' }} />
-              ))}
+              {ear.points.map((p) => {
+                const dotSize = Math.max(14, ear.w * 0.012);
+                return (
+                  <div key={p.id} style={{ position: 'absolute', left: p.x - dotSize / 2, top: p.y - dotSize / 2, width: dotSize, height: dotSize, borderRadius: '50%', background: '#ff2a2a', border: Math.max(2, dotSize * 0.18) + 'px solid #fff', boxShadow: '0 0 3px rgba(0,0,0,0.8)', pointerEvents: 'none' }} />
+                );
+              })}
             </div>
             {ear.status === 'detecting' && (
               <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13 }}>
@@ -701,7 +704,11 @@ function App() {
                   <span style={{ width: 34, textAlign: 'right' }}>{ear.params[key]}</span>
                 </div>
               ))}
-              <div style={{ opacity: 0.6, fontSize: 11, marginTop: 4 }}>Adjust if a photo's lighting differs a lot from the reference set, then re-run detection.</div>
+              <div style={{ opacity: 0.6, fontSize: 11, marginTop: 4, lineHeight: 1.5 }}>
+                If silk strands are getting counted as kernels: draw an exclusion box over them, and try raising "Sensitivity threshold" (fewer, more confident detections).<br/>
+                If real kernels are being missed: lower "Sensitivity threshold," or widen the Hue/Sat/Val ranges slightly.<br/>
+                Re-run detection after each change — small adjustments first.
+              </div>
             </div>
           )}
         </React.Fragment>
