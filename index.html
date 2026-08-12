@@ -4,11 +4,11 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 <title>Kernel Counter</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-<script src="https://docs.opencv.org/4.9.0/opencv.js" onload="window.__cvReady=true" onerror="window.__cvFailed=true"></script>
-<script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js" crossorigin="anonymous"></script>
+<script src="https://docs.opencv.org/4.9.0/opencv.js" crossorigin="anonymous" onload="window.__cvReady=true" onerror="window.__cvFailed=true"></script>
+<script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js" crossorigin="anonymous"></script>
 <style>
   html, body { margin: 0; padding: 0; background: #1c1a16; color: #f7f3ea; font-family: 'Courier New', monospace; }
   * { box-sizing: border-box; }
@@ -63,6 +63,59 @@ function uid() { return Math.random().toString(36).slice(2) + Date.now().toStrin
 // ================= Detection pipeline (OpenCV.js) =================
 // Returns array of {x, y, sigma} in image pixel coordinates.
 function detectKernels(cv, srcMat, excludeRects, params) {
+  const wOrig = srcMat.cols, hOrig = srcMat.rows;
+
+  // ---- auto-scale normalization ----
+  // The blob-detection scale (sigmaMin/sigmaMax) was calibrated against a reference photo
+  // where the ear's bounding box was roughly REF_EAR_WIDTH px wide. Phone photos vary hugely
+  // in resolution, so without this step, a higher-resolution photo makes every kernel look
+  // "too big" to the detector (splitting each real kernel into several false detections),
+  // and a lower-resolution one makes kernels look "too small" (missed entirely).
+  // Measure the ear's actual pixel width first, then work on a rescaled copy so kernel size
+  // in pixels always matches what the detector expects, regardless of source photo resolution.
+  const CALIBRATED_EAR_WIDTH = 1104; // ear bounding-box width (px) the sigma range below was tuned against
+
+  let hsvProbe = new cv.Mat();
+  cv.cvtColor(srcMat, hsvProbe, cv.COLOR_RGBA2RGB);
+  cv.cvtColor(hsvProbe, hsvProbe, cv.COLOR_RGB2HSV);
+  let lowP = new cv.Mat(hOrig, wOrig, hsvProbe.type(), [params.hLow, params.sLow, params.vLow, 0]);
+  let highP = new cv.Mat(hOrig, wOrig, hsvProbe.type(), [params.hHigh, params.sHigh, params.vHigh, 255]);
+  let maskProbe = new cv.Mat();
+  cv.inRange(hsvProbe, lowP, highP, maskProbe);
+  lowP.delete(); highP.delete(); hsvProbe.delete();
+  let closeKernelP = cv.Mat.ones(7, 7, cv.CV_8U);
+  cv.morphologyEx(maskProbe, maskProbe, cv.MORPH_CLOSE, closeKernelP);
+  closeKernelP.delete();
+  let lblP = new cv.Mat(), stP = new cv.Mat(), ctP = new cv.Mat();
+  let nP = cv.connectedComponentsWithStats(maskProbe, lblP, stP, ctP, 8, cv.CV_32S);
+  let bestI = 1, bestA = 0;
+  for (let i = 1; i < nP; i++) { const a = stP.intAt(i, cv.CC_STAT_AREA); if (a > bestA) { bestA = a; bestI = i; } }
+  const earWidthPx = bestA > 0 ? stP.intAt(bestI, cv.CC_STAT_WIDTH) : wOrig;
+  maskProbe.delete(); lblP.delete(); stP.delete(); ctP.delete();
+
+  const autoScale = Math.max(0.15, Math.min(2.5, CALIBRATED_EAR_WIDTH / Math.max(1, earWidthPx)));
+  console.log('auto-scale: ear width', earWidthPx, 'px -> scale factor', autoScale.toFixed(3));
+
+  let workMat = srcMat;
+  let didScale = false;
+  if (Math.abs(autoScale - 1) > 0.08) {
+    workMat = new cv.Mat();
+    cv.resize(srcMat, workMat, new cv.Size(Math.round(wOrig * autoScale), Math.round(hOrig * autoScale)), 0, 0, cv.INTER_AREA);
+    didScale = true;
+  }
+
+  const rawPoints = detectKernelsCore(cv, workMat, excludeRects.map((r) => ({
+    x: r.x * autoScale, y: r.y * autoScale, w: r.w * autoScale, h: r.h * autoScale,
+  })), params);
+
+  if (didScale) workMat.delete();
+
+  // map detected points back to original image coordinates
+  return rawPoints.map((p) => ({ x: p.x / autoScale, y: p.y / autoScale, sigma: p.sigma / autoScale }));
+}
+
+// Core detection at the pipeline's calibrated pixel scale — returns array of {x, y, sigma}.
+function detectKernelsCore(cv, srcMat, excludeRects, params) {
   const w = srcMat.cols, h = srcMat.rows;
 
   const hsv = new cv.Mat();
@@ -290,7 +343,10 @@ function App() {
 
   useEffect(() => {
     function onErr(ev) {
-      setGlobalError((ev.error && ev.error.message) || ev.message || String(ev));
+      const msg = (ev.error && ev.error.message) || ev.message || String(ev);
+      const where = ev.filename ? (' (' + ev.filename.split('/').pop() + ':' + ev.lineno + ':' + ev.colno + ')') : '';
+      const stack = ev.error && ev.error.stack ? '\n' + ev.error.stack.split('\n').slice(0, 4).join('\n') : '';
+      setGlobalError(msg + where + stack);
     }
     function onRejection(ev) {
       setGlobalError('Unhandled error: ' + (ev.reason && ev.reason.message ? ev.reason.message : String(ev.reason)));
