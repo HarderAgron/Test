@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Kernel Counter</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://docs.opencv.org/4.9.0/opencv.js" onload="window.__cvReady=true" onerror="window.__cvFailed=true"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #1c1a16; color: #f7f3ea; font-family: 'Courier New', monospace; }
+  * { box-sizing: border-box; }
+  button { font-family: inherit; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { background: #4a4638; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+
+const { useState, useRef, useEffect, useCallback } = React;
+
+const GOLD = '#b8972a';
+const DARK = '#1c1a16';
+const CREAM = '#f7f3ea';
+const PANEL = '#26221a';
+const MAX_EARS = 8;
+
+// ---------- storage shim: window.storage (claude.ai) or localStorage (standalone) ----------
+const hasClaudeStorage = typeof window.storage !== 'undefined';
+async function storageGet(key) {
+  try {
+    if (hasClaudeStorage) {
+      const r = await window.storage.get(key);
+      return r ? r.value : null;
+    }
+    return localStorage.getItem(key);
+  } catch (e) { return null; }
+}
+async function storageSet(key, val) {
+  try {
+    if (hasClaudeStorage) { await window.storage.set(key, val); }
+    else { localStorage.setItem(key, val); }
+  } catch (e) { /* ignore */ }
+}
+
+// ---------- default detection parameters (validated on the reference photo set) ----------
+const DEFAULT_PARAMS = {
+  hLow: 12, hHigh: 35, sLow: 70, sHigh: 255, vLow: 90, vHigh: 255,
+  sigmaMin: 5, sigmaMax: 13, numScales: 9,
+  dogThreshold: 6,       // minimum DoG response to count as a candidate blob
+  mergeMargin: 12,       // groove-dip tolerance (gray levels)
+  edgeThresh: 16,        // px from mask boundary treated as "edge zone"
+  minCandidateDist: 6,   // px, minimum spacing enforced during candidate extraction
+};
+
+function uid() { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
+
+// ================= Detection pipeline (OpenCV.js) =================
+// Returns array of {x, y, sigma} in image pixel coordinates.
+function detectKernels(cv, srcMat, excludeRects, params) {
+  const w = srcMat.cols, h = srcMat.rows;
+
+  const hsv = new cv.Mat();
+  cv.cvtColor(srcMat, hsv, cv.COLOR_RGBA2RGB);
+  cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
+
+  const low = new cv.Mat(h, w, hsv.type(), [params.hLow, params.sLow, params.vLow, 0]);
+  const high = new cv.Mat(h, w, hsv.type(), [params.hHigh, params.sHigh, params.vHigh, 255]);
+  const mask = new cv.Mat();
+  cv.inRange(hsv, low, high, mask);
+  low.delete(); high.delete();
+
+  const kernel7 = cv.Mat.ones(7, 7, cv.CV_8U);
+  cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, kernel7);
+  kernel7.delete();
+
+  // largest connected component = ear body
+  let labels = new cv.Mat(), stats = new cv.Mat(), centroids = new cv.Mat();
+  let n = cv.connectedComponentsWithStats(mask, labels, stats, centroids, 8, cv.CV_32S);
+  let largestIdx = 1, largestArea = 0;
+  for (let i = 1; i < n; i++) {
+    const area = stats.intAt(i, cv.CC_STAT_AREA);
+    if (area > largestArea) { largestArea = area; largestIdx = i; }
+  }
+  let clean = new cv.Mat.zeros(h, w, cv.CV_8U);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (labels.intAt(y, x) === largestIdx) clean.ucharPtr(y, x)[0] = 255;
+    }
+  }
+  labels.delete(); stats.delete(); centroids.delete();
+
+  // strip thin silk protrusions: open with big kernel, keep largest CC, restore true edges via AND
+  const kernel15 = cv.Mat.ones(15, 15, cv.CV_8U);
+  let opened = new cv.Mat();
+  cv.morphologyEx(clean, opened, cv.MORPH_OPEN, kernel15);
+  let labels2 = new cv.Mat(), stats2 = new cv.Mat(), centroids2 = new cv.Mat();
+  let n2 = cv.connectedComponentsWithStats(opened, labels2, stats2, centroids2, 8, cv.CV_32S);
+  let li2 = 1, la2 = 0;
+  for (let i = 1; i < n2; i++) {
+    const area = stats2.intAt(i, cv.CC_STAT_AREA);
+    if (area > la2) { la2 = area; li2 = i; }
+  }
+  let core = new cv.Mat.zeros(h, w, cv.CV_8U);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (labels2.intAt(y, x) === li2) core.ucharPtr(y, x)[0] = 255;
+    }
+  }
+  labels2.delete(); stats2.delete(); centroids2.delete(); opened.delete();
+  let restored = new cv.Mat();
+  cv.dilate(core, restored, kernel15);
+  core.delete(); kernel15.delete();
+  let finalMask = new cv.Mat();
+  cv.bitwise_and(clean, restored, finalMask);
+  clean.delete(); restored.delete();
+
+  // apply manual exclusion rectangles (husk / silk / disease spots the user marked)
+  for (const r of excludeRects) {
+    const x0 = Math.max(0, Math.round(r.x)), y0 = Math.max(0, Math.round(r.y));
+    const x1 = Math.min(w, Math.round(r.x + r.w)), y1 = Math.min(h, Math.round(r.y + r.h));
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) finalMask.ucharPtr(y, x)[0] = 0;
+    }
+  }
+
+  // distance-to-edge map, for edge-zone-aware merging
+  let distMat = new cv.Mat();
+  cv.distanceTransform(finalMask, distMat, cv.DIST_L2, 5);
+
+  // grayscale image for blob response + groove sampling
+  let gray = new cv.Mat();
+  cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
+  let grayF = new cv.Mat();
+  gray.convertTo(grayF, cv.CV_32F);
+
+  // ---- multi-scale DoG blob candidates ----
+  const sigmas = [];
+  const ns = Math.max(2, params.numScales);
+  for (let i = 0; i < ns; i++) {
+    sigmas.push(params.sigmaMin + (params.sigmaMax - params.sigmaMin) * i / (ns - 1));
+  }
+
+  let prevBlur = null;
+  const responseStack = []; // { sigma, mat }
+  for (let i = 0; i < sigmas.length; i++) {
+    const sigma = sigmas[i];
+    let blurred = new cv.Mat();
+    const ksize = Math.max(3, Math.round(sigma * 3) | 1);
+    cv.GaussianBlur(grayF, blurred, new cv.Size(ksize, ksize), sigma, sigma, cv.BORDER_REFLECT);
+    if (prevBlur) {
+      let dog = new cv.Mat();
+      cv.subtract(prevBlur.mat, blurred, dog); // brighter-at-finer-scale => positive at blob center
+      responseStack.push({ sigma: (prevBlur.sigma + sigma) / 2, mat: dog });
+    }
+    if (prevBlur) prevBlur.mat.delete();
+    prevBlur = { sigma, mat: blurred };
+  }
+  if (prevBlur) prevBlur.mat.delete();
+
+  // collect local maxima per scale (3x3 neighborhood), above threshold, inside mask
+  const candidates = [];
+  for (const { sigma, mat } of responseStack) {
+    const data = mat.data32F;
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        if (finalMask.ucharPtr(y, x)[0] === 0) continue;
+        const idx = y * w + x;
+        const v = data[idx];
+        if (v < params.dogThreshold) continue;
+        let isMax = true;
+        for (let dy = -1; dy <= 1 && isMax; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            if (data[idx + dy * w + dx] > v) { isMax = false; break; }
+          }
+        }
+        if (isMax) candidates.push({ x, y, sigma, response: v });
+      }
+    }
+    mat.delete();
+  }
+  grayF.delete();
+
+  // collapse near-duplicate candidates across adjacent scales (keep strongest within minCandidateDist)
+  candidates.sort((a, b) => b.response - a.response);
+  const kept = [];
+  for (const c of candidates) {
+    let dup = false;
+    for (const k of kept) {
+      const d = Math.hypot(c.x - k.x, c.y - k.y);
+      if (d < params.minCandidateDist) { dup = true; break; }
+    }
+    if (!dup) kept.push(c);
+  }
+
+  // ---- greedy edge-aware / groove-aware merge (ported from the validated Python logic) ----
+  kept.sort((a, b) => b.sigma - a.sigma);
+  const accepted = [];
+  const grayData = gray.data; // Uint8 CV_8UC1
+
+  function grayAt(x, y) {
+    if (x < 0 || y < 0 || x >= w || y >= h) return 0;
+    return grayData[y * w + x];
+  }
+  function robustGrooveDip(x1, y1, x2, y2) {
+    const nSamples = 21, win = 3;
+    const vals = [];
+    for (let i = 0; i < nSamples; i++) {
+      const t = 0.1 + (0.8 * i) / (nSamples - 1);
+      const xx = Math.round(x1 + t * (x2 - x1));
+      const yy = Math.round(y1 + t * (y2 - y1));
+      vals.push(grayAt(xx, yy));
+    }
+    if (vals.length < win) return Math.min(...vals);
+    let best = Infinity;
+    for (let i = 0; i <= vals.length - win; i++) {
+      let s = 0;
+      for (let j = 0; j < win; j++) s += vals[i + j];
+      best = Math.min(best, s / win);
+    }
+    return best;
+  }
+
+  for (const c of kept) {
+    const edgeD = distMat.floatAt(c.y, c.x);
+    let mergedIn = false;
+    for (const a of accepted) {
+      const d = Math.hypot(c.x - a.x, c.y - a.y);
+      const aEdgeD = distMat.floatAt(a.y, a.x);
+      if (edgeD < params.edgeThresh || aEdgeD < params.edgeThresh) {
+        const thresh = (c.sigma * Math.SQRT2 + a.sigma * Math.SQRT2) * 0.7;
+        if (d < thresh) { mergedIn = true; break; }
+      } else {
+        if (d < 45) {
+          const mv = robustGrooveDip(c.x, c.y, a.x, a.y);
+          const peakMin = Math.min(grayAt(c.x, c.y), grayAt(a.x, a.y));
+          if (mv > peakMin - params.mergeMargin) { mergedIn = true; break; }
+        }
+      }
+    }
+    if (!mergedIn) accepted.push(c);
+  }
+
+  hsv.delete(); mask.delete(); finalMask.delete(); distMat.delete(); gray.delete();
+
+  return accepted.map((p) => ({ x: p.x, y: p.y, sigma: p.sigma }));
+}
+
+// ================= App =================
+function App() {
+  const [cvReady, setCvReady] = useState(false);
+  const [cvFailed, setCvFailed] = useState(false);
+  const [ears, setEars] = useState([]); // {id, name, img (HTMLImageElement), imgData(dataURL), w, h, points[], excludeRects[], status, params}
+  const [current, setCurrent] = useState(null);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [mode, setMode] = useState('correct'); // 'correct' | 'exclude'
+  const [drawingRect, setDrawingRect] = useState(null);
+  const [showParams, setShowParams] = useState(false);
+  const [loadedFromStorage, setLoadedFromStorage] = useState(false);
+
+  const containerRef = useRef(null);
+  const dragState = useRef({ dragging: false, startX: 0, startY: 0, moved: false, pinchDist: null, panStart: null });
+  const fileInputRef = useRef(null);
+  const saveTimer = useRef(null);
+
+  useEffect(() => {
+    const t0 = Date.now();
+    function poll() {
+      if (window.cv && window.cv.Mat) { setCvReady(true); return; }
+      if (window.__cvFailed) { setCvFailed(true); return; }
+      if (Date.now() - t0 > 20000) { setCvFailed(true); return; }
+      setTimeout(poll, 150);
+    }
+    poll();
+  }, []);
+
+  // load saved ears list on mount
+  useEffect(() => {
+    (async () => {
+      const raw = await storageGet('kernel-app-ears');
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length) {
+            setEars(parsed);
+            setCurrent(parsed[0].id);
+          }
+        } catch (e) {}
+      }
+      setLoadedFromStorage(true);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!loadedFromStorage) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      storageSet('kernel-app-ears', JSON.stringify(ears));
+    }, 700);
+    return () => clearTimeout(saveTimer.current);
+  }, [ears, loadedFromStorage]);
+
+  const ear = ears.find((e) => e.id === current) || null;
+
+  function updateEar(id, patch) {
+    setEars((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
+  }
+
+  function resetView() { setZoom(1); setPan({ x: 0, y: 0 }); }
+
+  function handleFileUpload(files) {
+    const remaining = MAX_EARS - ears.length;
+    const list = Array.from(files).slice(0, Math.max(0, remaining));
+    list.forEach((file, idx) => {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const img = new Image();
+        img.onload = () => {
+          const id = uid();
+          const newEar = {
+            id,
+            name: 'Ear ' + (ears.length + idx + 1),
+            imgData: ev.target.result,
+            w: img.naturalWidth,
+            h: img.naturalHeight,
+            points: [],
+            excludeRects: [],
+            status: 'idle', // idle | detecting | done
+            params: { ...DEFAULT_PARAMS },
+          };
+          setEars((prev) => {
+            const next = [...prev, newEar];
+            return next;
+          });
+          setCurrent((c) => c || id);
+        };
+        img.src = ev.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function runDetection(id) {
+    const target = ears.find((e) => e.id === id);
+    if (!target || !window.cv || !window.cv.Mat) return;
+    updateEar(id, { status: 'detecting' });
+    setTimeout(() => {
+      try {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = target.w; canvas.height = target.h;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          const imageData = ctx.getImageData(0, 0, target.w, target.h);
+          const cv = window.cv;
+          const mat = cv.matFromImageData(imageData);
+          let pts;
+          try {
+            pts = detectKernels(cv, mat, target.excludeRects, target.params);
+          } finally {
+            mat.delete();
+          }
+          const points = pts.map((p) => ({ id: uid(), x: p.x, y: p.y }));
+          updateEar(id, { points, status: 'done' });
+        };
+        img.src = target.imgData;
+      } catch (err) {
+        console.error(err);
+        updateEar(id, { status: 'error' });
+      }
+    }, 30);
+  }
+
+  const clientToImageCoords = (clientX, clientY) => {
+    const el = containerRef.current;
+    if (!el || !ear) return null;
+    const rect = el.getBoundingClientRect();
+    const cx = clientX - rect.left, cy = clientY - rect.top;
+    const fitScale = Math.min(rect.width / ear.w, rect.height / ear.h);
+    const dispW = ear.w * fitScale * zoom, dispH = ear.h * fitScale * zoom;
+    const originX = rect.width / 2 - dispW / 2 + pan.x;
+    const originY = rect.height / 2 - dispH / 2 + pan.y;
+    return { x: (cx - originX) / (fitScale * zoom), y: (cy - originY) / (fitScale * zoom), fitScale };
+  };
+
+  const HIT_RADIUS = 16;
+
+  function handleTap(clientX, clientY) {
+    if (!ear) return;
+    const coords = clientToImageCoords(clientX, clientY);
+    if (!coords) return;
+    const { x, y } = coords;
+    if (x < -20 || y < -20 || x > ear.w + 20 || y > ear.h + 20) return;
+    let nearestIdx = -1, nearestDist = Infinity;
+    ear.points.forEach((p, i) => {
+      const d = (p.x - x) ** 2 + (p.y - y) ** 2;
+      if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
+    });
+    if (nearestIdx >= 0 && Math.sqrt(nearestDist) < HIT_RADIUS) {
+      updateEar(ear.id, { points: ear.points.filter((_, i) => i !== nearestIdx) });
+    } else {
+      updateEar(ear.id, { points: [...ear.points, { id: uid(), x, y }] });
+    }
+  }
+
+  function onMouseDown(e) {
+    if (mode === 'exclude') {
+      const coords = clientToImageCoords(e.clientX, e.clientY);
+      if (coords) setDrawingRect({ x0: coords.x, y0: coords.y, x1: coords.x, y1: coords.y });
+      return;
+    }
+    dragState.current = { dragging: true, startX: e.clientX, startY: e.clientY, moved: false, panStart: { ...pan } };
+  }
+  function onMouseMove(e) {
+    if (mode === 'exclude' && drawingRect) {
+      const coords = clientToImageCoords(e.clientX, e.clientY);
+      if (coords) setDrawingRect((r) => ({ ...r, x1: coords.x, y1: coords.y }));
+      return;
+    }
+    if (!dragState.current.dragging) return;
+    const dx = e.clientX - dragState.current.startX, dy = e.clientY - dragState.current.startY;
+    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) dragState.current.moved = true;
+    if (dragState.current.moved) setPan({ x: dragState.current.panStart.x + dx, y: dragState.current.panStart.y + dy });
+  }
+  function onMouseUp(e) {
+    if (mode === 'exclude' && drawingRect) {
+      const x = Math.min(drawingRect.x0, drawingRect.x1), y = Math.min(drawingRect.y0, drawingRect.y1);
+      const w = Math.abs(drawingRect.x1 - drawingRect.x0), h = Math.abs(drawingRect.y1 - drawingRect.y0);
+      if (w > 4 && h > 4 && ear) {
+        updateEar(ear.id, { excludeRects: [...ear.excludeRects, { id: uid(), x, y, w, h }] });
+      }
+      setDrawingRect(null);
+      return;
+    }
+    if (dragState.current.dragging && !dragState.current.moved) handleTap(e.clientX, e.clientY);
+    dragState.current.dragging = false;
+  }
+  function onWheel(e) {
+    e.preventDefault();
+    setZoom((z) => Math.min(6, Math.max(1, z + (e.deltaY > 0 ? -0.15 : 0.15))));
+  }
+  function onTouchStart(e) {
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      if (mode === 'exclude') {
+        const coords = clientToImageCoords(t.clientX, t.clientY);
+        if (coords) setDrawingRect({ x0: coords.x, y0: coords.y, x1: coords.x, y1: coords.y });
+        return;
+      }
+      dragState.current = { dragging: true, startX: t.clientX, startY: t.clientY, moved: false, pinchDist: null, panStart: { ...pan } };
+    } else if (e.touches.length === 2) {
+      const [a, b] = e.touches;
+      dragState.current = { ...dragState.current, dragging: false, pinchDist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), zoomStart: zoom };
+    }
+  }
+  function onTouchMove(e) {
+    if (mode === 'exclude' && drawingRect) {
+      const t = e.touches[0];
+      const coords = clientToImageCoords(t.clientX, t.clientY);
+      if (coords) { e.preventDefault(); setDrawingRect((r) => ({ ...r, x1: coords.x, y1: coords.y })); }
+      return;
+    }
+    if (e.touches.length === 2) {
+      e.preventDefault();
+      const [a, b] = e.touches;
+      const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      if (dragState.current.pinchDist) setZoom(Math.min(6, Math.max(1, dragState.current.zoomStart * (d / dragState.current.pinchDist))));
+    } else if (e.touches.length === 1 && dragState.current.dragging) {
+      const t = e.touches[0];
+      const dx = t.clientX - dragState.current.startX, dy = t.clientY - dragState.current.startY;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) dragState.current.moved = true;
+      if (dragState.current.moved) { e.preventDefault(); setPan({ x: dragState.current.panStart.x + dx, y: dragState.current.panStart.y + dy }); }
+    }
+  }
+  function onTouchEnd(e) {
+    if (mode === 'exclude' && drawingRect) {
+      const x = Math.min(drawingRect.x0, drawingRect.x1), y = Math.min(drawingRect.y0, drawingRect.y1);
+      const w = Math.abs(drawingRect.x1 - drawingRect.x0), h = Math.abs(drawingRect.y1 - drawingRect.y0);
+      if (w > 4 && h > 4 && ear) updateEar(ear.id, { excludeRects: [...ear.excludeRects, { id: uid(), x, y, w, h }] });
+      setDrawingRect(null);
+      return;
+    }
+    if (dragState.current.dragging && !dragState.current.moved && e.changedTouches.length === 1) {
+      const t = e.changedTouches[0];
+      handleTap(t.clientX, t.clientY);
+    }
+    dragState.current.dragging = false; dragState.current.pinchDist = null;
+  }
+
+  function exportJSON() {
+    const out = ears.map((e) => ({ name: e.name, count: e.points.length, points: e.points.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) })) }));
+    const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'kernel-counts.json'; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function removeEar(id) {
+    setEars((prev) => prev.filter((e) => e.id !== id));
+    if (current === id) setCurrent((prev) => { const rest = ears.filter((e) => e.id !== id); return rest.length ? rest[0].id : null; });
+  }
+
+  const totalCount = ears.reduce((s, e) => s + e.points.length, 0);
+
+  const rect = containerRef.current ? containerRef.current.getBoundingClientRect() : { width: 360, height: 420 };
+  const fitScale = ear ? Math.min((rect.width || 360) / ear.w, (rect.height || 420) / ear.h) : 1;
+
+  return (
+    <div style={{ fontFamily: "'Courier New', monospace", background: DARK, minHeight: '100vh', color: CREAM, paddingBottom: 24 }}>
+      <div style={{ padding: '14px 16px 8px', borderBottom: `1px solid ${GOLD}44` }}>
+        <div style={{ fontFamily: 'Georgia, serif', fontSize: 22, color: GOLD }}>Kernel Counter</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginTop: 2 }}>
+          {!cvReady && !cvFailed && 'Loading detection engine…'}
+          {cvFailed && 'Detection engine failed to load — you can still count manually.'}
+          {cvReady && 'Upload up to 8 ears. Draw exclusion boxes over husk/silk/disease spots, then detect.'}
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, padding: '10px 12px 0', flexWrap: 'wrap', alignItems: 'center' }}>
+        {ears.map((e) => (
+          <button key={e.id} onClick={() => { setCurrent(e.id); resetView(); }}
+            style={{
+              padding: '7px 10px', borderRadius: 8, border: `1px solid ${current === e.id ? GOLD : '#4a4638'}`,
+              background: current === e.id ? GOLD : 'transparent', color: current === e.id ? DARK : CREAM,
+              fontSize: 12, fontWeight: current === e.id ? 700 : 400, cursor: 'pointer', position: 'relative',
+            }}>
+            {e.name}<div style={{ fontSize: 13 }}>{e.points.length}</div>
+          </button>
+        ))}
+        {ears.length < MAX_EARS && (
+          <button onClick={() => fileInputRef.current && fileInputRef.current.click()}
+            style={{ padding: '7px 12px', borderRadius: 8, border: `1px dashed ${GOLD}`, background: 'transparent', color: GOLD, fontSize: 12, cursor: 'pointer' }}>
+            + Add ear ({ears.length}/{MAX_EARS})
+          </button>
+        )}
+        <input ref={fileInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }}
+          onChange={(ev) => { if (ev.target.files && ev.target.files.length) handleFileUpload(ev.target.files); ev.target.value = ''; }} />
+      </div>
+
+      {!ear && (
+        <div style={{ margin: 20, padding: 30, textAlign: 'center', border: `1px dashed #4a4638`, borderRadius: 10, opacity: 0.8 }}>
+          No ears yet. Tap "+ Add ear" to upload a photo.
+        </div>
+      )}
+
+      {ear && (
+        <React.Fragment>
+          <div ref={containerRef}
+            style={{ position: 'relative', margin: '12px', height: '52vh', minHeight: 320, background: '#0e0d0a', borderRadius: 10, overflow: 'hidden', touchAction: 'none', border: '1px solid #3a3630', cursor: mode === 'exclude' ? 'crosshair' : (zoom > 1 ? 'grab' : 'crosshair') }}
+            onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}
+            onMouseLeave={() => { dragState.current.dragging = false; setDrawingRect(null); }}
+            onWheel={onWheel} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
+            <div style={{ position: 'absolute', left: '50%', top: '50%', width: ear.w, height: ear.h,
+              transform: `translate(-50%, -50%) translate(${pan.x}px, ${pan.y}px) scale(${fitScale * zoom})`, transformOrigin: 'center center' }}>
+              <img src={ear.imgData} draggable={false} style={{ width: ear.w, height: ear.h, display: 'block', userSelect: 'none', pointerEvents: 'none' }} />
+              {ear.excludeRects.map((r) => (
+                <div key={r.id} style={{ position: 'absolute', left: r.x, top: r.y, width: r.w, height: r.h, border: '2px dashed #8888ff', background: 'rgba(80,80,255,0.15)' }}
+                  onDoubleClick={() => updateEar(ear.id, { excludeRects: ear.excludeRects.filter((x) => x.id !== r.id) })} />
+              ))}
+              {drawingRect && (
+                <div style={{ position: 'absolute', left: Math.min(drawingRect.x0, drawingRect.x1), top: Math.min(drawingRect.y0, drawingRect.y1),
+                  width: Math.abs(drawingRect.x1 - drawingRect.x0), height: Math.abs(drawingRect.y1 - drawingRect.y0), border: '2px dashed #8888ff', background: 'rgba(80,80,255,0.2)' }} />
+              )}
+              {ear.points.map((p) => (
+                <div key={p.id} style={{ position: 'absolute', left: p.x - 5, top: p.y - 5, width: 10, height: 10, borderRadius: '50%', background: '#e0332f', border: '1.4px solid #fff', pointerEvents: 'none' }} />
+              ))}
+            </div>
+            {ear.status === 'detecting' && (
+              <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13 }}>
+                Detecting kernels…
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', gap: 6, padding: '0 12px 8px', flexWrap: 'wrap' }}>
+            <button onClick={() => setMode(mode === 'exclude' ? 'correct' : 'exclude')}
+              style={btnStyle(mode === 'exclude')}>{mode === 'exclude' ? 'Drawing exclusion boxes (tap to stop)' : 'Draw exclusion box'}</button>
+            <button onClick={() => runDetection(ear.id)} disabled={!cvReady} style={btnStyle(false, !cvReady)}>
+              {ear.status === 'done' ? 'Re-run detection' : 'Detect kernels'}
+            </button>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, padding: '0 12px 6px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <button onClick={() => setZoom((z) => Math.min(6, z + 0.5))} style={btnStyle()}>+</button>
+            <button onClick={() => setZoom((z) => Math.max(1, z - 0.5))} style={btnStyle()}>–</button>
+            <button onClick={resetView} style={btnStyle()}>Reset view</button>
+            <button onClick={() => updateEar(ear.id, { points: [] })} style={btnStyle()}>Clear dots</button>
+            <button onClick={() => setShowParams((s) => !s)} style={btnStyle()}>{showParams ? 'Hide' : 'Tune'} detection settings</button>
+            <button onClick={() => removeEar(ear.id)} style={{ ...btnStyle(), borderColor: '#7a3b3b', color: '#e0a0a0' }}>Remove this ear</button>
+          </div>
+
+          {showParams && (
+            <div style={{ margin: '0 12px 10px', padding: 12, background: PANEL, borderRadius: 8, fontSize: 12 }}>
+              {[
+                ['hLow', 'Hue min', 0, 60], ['hHigh', 'Hue max', 0, 60],
+                ['sLow', 'Sat min', 0, 255], ['sHigh', 'Sat max', 0, 255],
+                ['vLow', 'Val min', 0, 255], ['vHigh', 'Val max', 0, 255],
+                ['sigmaMin', 'Blob scale min', 2, 20], ['sigmaMax', 'Blob scale max', 2, 25],
+                ['dogThreshold', 'Sensitivity threshold', 1, 20],
+                ['mergeMargin', 'Merge margin', 2, 30],
+              ].map(([key, label, min, max]) => (
+                <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <span style={{ width: 140, opacity: 0.8 }}>{label}</span>
+                  <input type="range" min={min} max={max} value={ear.params[key]}
+                    onChange={(ev) => updateEar(ear.id, { params: { ...ear.params, [key]: Number(ev.target.value) } })}
+                    style={{ flex: 1 }} />
+                  <span style={{ width: 34, textAlign: 'right' }}>{ear.params[key]}</span>
+                </div>
+              ))}
+              <div style={{ opacity: 0.6, fontSize: 11, marginTop: 4 }}>Adjust if a photo's lighting differs a lot from the reference set, then re-run detection.</div>
+            </div>
+          )}
+        </React.Fragment>
+      )}
+
+      <div style={{ margin: '10px 12px 20px', padding: '12px 14px', background: PANEL, borderRadius: 10, border: `1px solid ${GOLD}33` }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', rowGap: 6, fontSize: 13 }}>
+          {ears.map((e) => (
+            <React.Fragment key={e.id}>
+              <div style={{ opacity: 0.75 }}>{e.name}</div>
+              <div style={{ textAlign: 'right', fontWeight: 700 }}>{e.points.length}</div>
+            </React.Fragment>
+          ))}
+        </div>
+        <div style={{ height: 1, background: `${GOLD}33`, margin: '10px 0' }} />
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 16 }}>
+          <span style={{ color: GOLD, fontWeight: 700 }}>Total</span>
+          <span style={{ color: GOLD, fontWeight: 700 }}>{totalCount}</span>
+        </div>
+        <button onClick={exportJSON} style={{ ...btnStyle(), width: '100%', marginTop: 10 }}>Export counts (JSON)</button>
+      </div>
+    </div>
+  );
+}
+
+function btnStyle(active, disabled) {
+  return {
+    padding: '7px 12px', borderRadius: 7, border: `1px solid ${active ? GOLD : '#4a4638'}`,
+    background: active ? GOLD : 'transparent', color: active ? DARK : (disabled ? '#666' : CREAM),
+    fontSize: 12, cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1,
+  };
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+
+</script>
+</body>
+</html>
