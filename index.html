@@ -7,7 +7,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js" crossorigin="anonymous"></script>
-<script src="https://docs.opencv.org/4.9.0/opencv.js" crossorigin="anonymous" onload="window.__cvReady=true" onerror="window.__cvFailed=true"></script>
+<script id="opencv-script" src="https://docs.opencv.org/4.9.0/opencv.js" crossorigin="anonymous" onload="window.__cvReady=true" onerror="window.__cvFailed=true"></script>
 <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js" crossorigin="anonymous"></script>
 <style>
   html, body { margin: 0; padding: 0; background: #1c1a16; color: #f7f3ea; font-family: 'Courier New', monospace; }
@@ -330,6 +330,8 @@ function detectKernelsCore(cv, srcMat, excludeRects, params) {
 function App() {
   const [cvReady, setCvReady] = useState(false);
   const [cvFailed, setCvFailed] = useState(false);
+  const [cvSlow, setCvSlow] = useState(false);
+  const [cvRetryKey, setCvRetryKey] = useState(0);
   const [ears, setEars] = useState([]); // {id, name, img (HTMLImageElement), imgData(dataURL), w, h, points[], excludeRects[], status, params}
   const [current, setCurrent] = useState(null);
   const [zoom, setZoom] = useState(1);
@@ -366,14 +368,36 @@ function App() {
 
   useEffect(() => {
     const t0 = Date.now();
+    let cancelled = false;
+    setCvFailed(false);
+    setCvSlow(false);
     function poll() {
+      if (cancelled) return;
       if (window.cv && window.cv.Mat) { setCvReady(true); return; }
       if (window.__cvFailed) { setCvFailed(true); return; }
-      if (Date.now() - t0 > 20000) { setCvFailed(true); return; }
+      const elapsed = Date.now() - t0;
+      if (elapsed > 8000) setCvSlow(true);
+      if (elapsed > 60000) { setCvFailed(true); return; }
       setTimeout(poll, 150);
     }
     poll();
-  }, []);
+    return () => { cancelled = true; };
+  }, [cvRetryKey]);
+
+  function retryLoadCv() {
+    window.__cvFailed = false;
+    delete window.cv;
+    const old = document.getElementById('opencv-script');
+    if (old) old.remove();
+    const s = document.createElement('script');
+    s.id = 'opencv-script';
+    s.src = 'https://docs.opencv.org/4.9.0/opencv.js';
+    s.crossOrigin = 'anonymous';
+    s.onerror = () => { window.__cvFailed = true; };
+    document.head.appendChild(s);
+    setCvReady(false);
+    setCvRetryKey((k) => k + 1);
+  }
 
   // load saved ears list on mount
   useEffect(() => {
@@ -665,10 +689,17 @@ function App() {
       <div style={{ padding: '14px 16px 8px', borderBottom: `1px solid ${GOLD}44` }}>
         <div style={{ fontFamily: 'Georgia, serif', fontSize: 22, color: GOLD }}>Kernel Counter</div>
         <div style={{ fontSize: 12, opacity: 0.7, marginTop: 2 }}>
-          {!cvReady && !cvFailed && 'Loading detection engine…'}
-          {cvFailed && 'Detection engine failed to load — you can still count manually.'}
+          {!cvReady && !cvFailed && !cvSlow && 'Loading detection engine…'}
+          {!cvReady && !cvFailed && cvSlow && 'Still loading the detection engine (it\'s a large file — this can take a while on a slow connection)…'}
+          {cvFailed && 'Detection engine could not load — likely a network or firewall issue blocking docs.opencv.org. You can still count manually, or try again below (a different network, like a phone hotspot, often fixes this).'}
           {cvReady && 'Upload up to 8 ears. Draw exclusion boxes over husk/silk/disease spots, then detect.'}
         </div>
+        {cvFailed && (
+          <button onClick={retryLoadCv}
+            style={{ marginTop: 8, padding: '7px 14px', borderRadius: 7, border: `1px solid ${GOLD}`, background: 'transparent', color: GOLD, fontSize: 12, cursor: 'pointer' }}>
+            Retry loading detection engine
+          </button>
+        )}
       </div>
 
       {(uploadError || globalError) && (
