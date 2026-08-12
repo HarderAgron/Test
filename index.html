@@ -8,6 +8,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 <script src="https://docs.opencv.org/4.9.0/opencv.js" onload="window.__cvReady=true" onerror="window.__cvFailed=true"></script>
+<script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
 <style>
   html, body { margin: 0; padding: 0; background: #1c1a16; color: #f7f3ea; font-family: 'Courier New', monospace; }
   * { box-sizing: border-box; }
@@ -331,6 +332,42 @@ function App() {
 
   function resetView() { setZoom(1); setPan({ x: 0, y: 0 }); }
 
+  function isHeic(file) {
+    const t = (file.type || '').toLowerCase();
+    const n = (file.name || '').toLowerCase();
+    return t.includes('heic') || t.includes('heif') || n.endsWith('.heic') || n.endsWith('.heif');
+  }
+
+  async function readAsImage(file) {
+    // HEIC (default iPhone photo format) isn't decodable by most browsers directly — convert first.
+    let workingFile = file;
+    if (isHeic(file)) {
+      if (typeof window.heic2any !== 'function') {
+        throw new Error('"' + file.name + '" is a HEIC photo, and the HEIC converter did not load (check your connection and reload). Try exporting as JPEG instead.');
+      }
+      const convertedBlob = await window.heic2any({ blob: file, toType: 'image/jpeg', quality: 0.9 });
+      workingFile = new File([convertedBlob], file.name.replace(/\.(heic|heif)$/i, '.jpg'), { type: 'image/jpeg' });
+    } else if (file.type && !file.type.startsWith('image/')) {
+      throw new Error('"' + file.name + '" does not look like an image file (type: ' + file.type + ').');
+    }
+
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('Could not read "' + file.name + '": ' + (reader.error ? reader.error.message : 'unknown error')));
+      reader.onload = (ev) => resolve(ev.target.result);
+      reader.readAsDataURL(workingFile);
+    });
+
+    const img = await new Promise((resolve, reject) => {
+      const im = new Image();
+      im.onload = () => resolve(im);
+      im.onerror = () => reject(new Error('"' + file.name + '" could not be decoded as an image.'));
+      im.src = dataUrl;
+    });
+
+    return { dataUrl, width: img.naturalWidth, height: img.naturalHeight };
+  }
+
   function handleFileUpload(files) {
     console.log('handleFileUpload called with', files.length, 'file(s)');
     setUploadError(null);
@@ -340,44 +377,28 @@ function App() {
       setUploadError('No files to add (already at ' + MAX_EARS + ' ears, or no files were selected).');
       return;
     }
-    list.forEach((file, idx) => {
+    list.forEach(async (file, idx) => {
       console.log('reading file', file.name, file.type, file.size);
-      if (!file.type || !file.type.startsWith('image/')) {
-        setUploadError('"' + file.name + '" does not look like an image file (type: ' + file.type + ').');
-        return;
+      try {
+        const { dataUrl, width, height } = await readAsImage(file);
+        const id = uid();
+        const newEar = {
+          id,
+          name: 'Ear ' + (ears.length + idx + 1),
+          imgData: dataUrl,
+          w: width,
+          h: height,
+          points: [],
+          excludeRects: [],
+          status: 'idle',
+          params: { ...DEFAULT_PARAMS },
+        };
+        setEars((prev) => [...prev, newEar]);
+        setCurrent((c) => c || id);
+      } catch (err) {
+        console.error('upload failed for', file.name, err);
+        setUploadError(err.message || String(err));
       }
-      const reader = new FileReader();
-      reader.onerror = () => {
-        console.error('FileReader error for', file.name, reader.error);
-        setUploadError('Could not read "' + file.name + '": ' + (reader.error ? reader.error.message : 'unknown error'));
-      };
-      reader.onload = (ev) => {
-        console.log('FileReader loaded', file.name, 'data length:', ev.target.result ? ev.target.result.length : 0);
-        const img = new Image();
-        img.onerror = () => {
-          console.error('Image decode failed for', file.name);
-          setUploadError('"' + file.name + '" could not be decoded as an image.');
-        };
-        img.onload = () => {
-          console.log('Image decoded', file.name, img.naturalWidth, 'x', img.naturalHeight);
-          const id = uid();
-          const newEar = {
-            id,
-            name: 'Ear ' + (ears.length + idx + 1),
-            imgData: ev.target.result,
-            w: img.naturalWidth,
-            h: img.naturalHeight,
-            points: [],
-            excludeRects: [],
-            status: 'idle', // idle | detecting | done
-            params: { ...DEFAULT_PARAMS },
-          };
-          setEars((prev) => [...prev, newEar]);
-          setCurrent((c) => c || id);
-        };
-        img.src = ev.target.result;
-      };
-      reader.readAsDataURL(file);
     });
   }
 
